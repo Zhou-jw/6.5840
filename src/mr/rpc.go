@@ -30,7 +30,8 @@ type Task struct {
 	// type = 0: map, 1: reduce
 	Type_id  int
 	Filename string
-	Taskid   int
+	Taskid   int // id of all tasks
+	Innerid  int // id of Map/Reduce tasks
 	NReduce  int
 }
 

@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 )
 
@@ -17,6 +19,12 @@ type KeyValue struct {
 	Value string
 }
 
+type ByKey []KeyValue
+
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -25,18 +33,67 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-// main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func DoReduce(reducef func(string, []string) string, task *Task) error {
+	var intermediate []KeyValue
+	reduceid := task.Innerid
+	fmt.Printf("reduce id is %d", reduceid)
 
+	// match files to be reduced
+	pattern := fmt.Sprintf("mr-*-%d", reduceid)
+	files, err := filepath.Glob(pattern)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil
+	}
+
+	// read content of each mr-X-reduceid
+	for _, ifilename := range files {
+		ifile, err := os.Open(ifilename)
+		if err != nil {
+			log.Fatalf("cannot open %v", ifilename)
+		}
+		dec := json.NewDecoder(ifile)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		ifile.Close()
+	}
+
+	// reduce phase
+	sort.Sort(ByKey(intermediate))
+	ofile, _ := os.Create(fmt.Sprintf("mr-out-%d", reduceid))
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+	ofile.Close()
+
+	return nil
+}
+
+func DoMap(mapf func(string, string) []KeyValue, task *Task) error {
 	var kva []KeyValue
-	new_task := AskForTask()
-	nReduce := new_task.NReduce
-	fmt.Printf("nReduce is %d",nReduce)
-	// Your worker implementation here.
-	// Map worker
+	nReduce := task.NReduce
+	fmt.Printf("nReduce is %d", nReduce)
 	// read content of pg-*
-	filename := new_task.Filename
+	filename := task.Filename
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
@@ -59,17 +116,38 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// write intermediate output to mr-X-Y
 	for i := 0; i < nReduce; i++ {
-		oname := "mr-" + strconv.Itoa(new_task.Taskid) + "-" + strconv.Itoa(i)
+		oname := "mr-" + strconv.Itoa(task.Taskid) + "-" + strconv.Itoa(i)
 		ofile, _ := os.Create(oname)
 		enc := json.NewEncoder(ofile)
 
 		for kv := range total_inter_files[i] {
-			err = enc.Encode(&kv)
+			err = enc.Encode(kv)
 			if err != nil {
 				log.Fatalf("cannot encode kv:%v in file: %v", kv, filename)
 			}
 		}
 		ofile.Close()
+	}
+	return nil
+}
+
+// main/mrworker.go calls this function.
+func Worker(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) {
+
+	new_task := AskForTask()
+	// Your worker implementation here.
+	if new_task.Type_id == 0 {
+		// Map worker
+		err := DoMap(mapf, new_task)
+		if err != nil {
+			log.Printf("fail to map, worker.id is %d, taskid is %d\n", new_task.Innerid, new_task.Taskid)
+		}
+	} else {
+		err := DoReduce(reducef, new_task) 
+		if err != nil {
+			log.Printf("fail to reduce, worker.id is %d, taskid is %d\n", new_task.Innerid, new_task.Taskid)
+		}
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
@@ -80,7 +158,7 @@ func AskForTask() *Task {
 	args := ExampleArgs{}
 	new_task := Task{}
 	// reduce_task := Task{}
-	ok := call("Coordinator.GiveTask", &args, &new_task)
+	ok := call("Coordinator.GiveTasks", &args, &new_task)
 
 	if ok {
 		fmt.Printf("ask for task, task file: %v\n", new_task.Filename)
