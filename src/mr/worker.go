@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -36,7 +37,7 @@ func ihash(key string) int {
 func DoReduce(reducef func(string, []string) string, task *Task) error {
 	var intermediate []KeyValue
 	reduceid := task.Innerid
-	fmt.Printf("reduce id is %d", reduceid)
+	fmt.Printf("reduce id is %d\n", reduceid)
 
 	// match files to be reduced
 	pattern := fmt.Sprintf("mr-*-%d", reduceid)
@@ -91,7 +92,7 @@ func DoReduce(reducef func(string, []string) string, task *Task) error {
 func DoMap(mapf func(string, string) []KeyValue, task *Task) error {
 	var kva []KeyValue
 	nReduce := task.NReduce
-	fmt.Printf("nReduce is %d", nReduce)
+	fmt.Printf("nReduce is %d\n", nReduce)
 	// read content of pg-*
 	filename := task.Filename
 	file, err := os.Open(filename)
@@ -116,11 +117,11 @@ func DoMap(mapf func(string, string) []KeyValue, task *Task) error {
 
 	// write intermediate output to mr-X-Y
 	for i := 0; i < nReduce; i++ {
-		oname := "mr-" + strconv.Itoa(task.Taskid) + "-" + strconv.Itoa(i)
+		oname := "mr-" + strconv.Itoa(task.Innerid) + "-" + strconv.Itoa(i)
 		ofile, _ := os.Create(oname)
 		enc := json.NewEncoder(ofile)
 
-		for kv := range total_inter_files[i] {
+		for _, kv := range total_inter_files[i] {
 			err = enc.Encode(kv)
 			if err != nil {
 				log.Fatalf("cannot encode kv:%v in file: %v", kv, filename)
@@ -134,19 +135,33 @@ func DoMap(mapf func(string, string) []KeyValue, task *Task) error {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
-	new_task := AskForTask()
-	// Your worker implementation here.
-	if new_task.Type_id == 0 {
-		// Map worker
-		err := DoMap(mapf, new_task)
-		if err != nil {
-			log.Printf("fail to map, worker.id is %d, taskid is %d\n", new_task.Innerid, new_task.Taskid)
+	meta := WorkerMeta{Workerid: 0, Stat: Ready}
+	var new_task = Task{}
+	for AskForTask(&meta, &new_task) {
+		if meta.Stat == Waiting {
+			// sleep for 1s
+			time.Sleep(time.Second)
 		}
-	} else {
-		err := DoReduce(reducef, new_task) 
-		if err != nil {
-			log.Printf("fail to reduce, worker.id is %d, taskid is %d\n", new_task.Innerid, new_task.Taskid)
+		// Your worker implementation here.
+		if new_task.Type_id == 0 {
+			// Map worker
+			err := DoMap(mapf, &new_task)
+			if err != nil {
+				log.Printf("fail to map, worker.id is %d, taskid is %d\n", meta.Workerid, new_task.Innerid)
+			}
+			mtask_info := TaskInfo{Type_id: 0, Taskid: new_task.Innerid}
+			ok := call("Coordinator.TaskiFinish", &mtask_info, &ExampleReply{})
+			if ok {
+				log.Printf("maptask finished, worker.id is %d, taskid is %d", meta.Workerid, new_task.Innerid)
+			} else {
+				log.Printf("fail to tell coordinator maptask finished, worker.id is %d, taskid is %d", meta.Workerid, new_task.Innerid)
+
+			}
+		} else {
+			err := DoReduce(reducef, &new_task)
+			if err != nil {
+				log.Printf("fail to reduce, worker.id is %d, taskid is %d\n", meta.Workerid, new_task.Innerid)
+			}
 		}
 	}
 
@@ -154,18 +169,33 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 }
 
-func AskForTask() *Task {
-	args := ExampleArgs{}
-	new_task := Task{}
+func AskForTask(meta *WorkerMeta, ret_task *Task) bool {
 	// reduce_task := Task{}
-	ok := call("Coordinator.GiveTasks", &args, &new_task)
+	metatmp := *meta
+	tasktmp := Task{}
 
-	if ok {
-		fmt.Printf("ask for task, task file: %v\n", new_task.Filename)
-	} else {
+	ok := call("Coordinator.GiveTasks", &metatmp, &tasktmp)
+	*meta = metatmp
+	*ret_task = tasktmp
+	fmt.Printf("meta.Stat is %d\n", meta.Stat)
+	fmt.Printf("metatmp.Stat is %d\n", metatmp.Stat)
+
+	if ok && meta.Stat == Ready {
+		if ret_task.Type_id == 0 {
+			fmt.Printf("ask for map task, task file: %v\n", ret_task.Filename)
+		} else {
+			fmt.Printf("ask for reduce task, task file: %v\n", ret_task.Filename)
+		}
+	} else if !ok {
 		fmt.Printf("fail to ask for task\n")
 	}
-	return &new_task
+
+	if meta.Stat == Notask {
+		fmt.Println("Notask")
+		return false
+	}
+
+	return true
 }
 
 // example function to show how to make an RPC call to the coordinator.

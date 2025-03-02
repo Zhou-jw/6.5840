@@ -1,12 +1,14 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 type TaskState int
@@ -25,51 +27,86 @@ type Coordinator struct {
 	map_chan    chan *Task
 	reduce_chan chan *Task
 	// workers     []chan *Task
-	task_cnt   int
+	worker_cnt int64
 	taskStatus map[int]TaskState
 	isDone     bool
 }
 
-func (c *Coordinator) next_task_id() int {
-	c.task_cnt += 1
-	return c.task_cnt - 1
+func (c *Coordinator) next_worker_id() int {
+	return int(atomic.AddInt64(&c.worker_cnt, 1))
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) GiveTasks(args *ExampleArgs, reply *Task) error {
+func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *Task) error {
 	// hold the big lock
 	c.state_lock.Lock()
 	if c.isDone {
+		// fmt.Println("c.isDone")
+		args.Stat = Notask
+		fmt.Printf("args.Stat is %d\n", args.Stat)
 		c.state_lock.Unlock()
 		return nil
 	}
 	defer c.state_lock.Unlock()
 
-	// assign map task
-	if len(c.map_chan) > 0 {
-		*reply = *<-c.map_chan
-		c.taskStatus[reply.Taskid] = InProgress
-		return nil
+	// assign worker id
+	if args.Workerid == 0 {
+		args.Workerid = c.next_worker_id()
 	}
-	// for _, mtask := range c.mapTasks {
-	// 	if c.taskStatus[mtask.Taskid] == Unassigned {
-	// 		c.taskStatus[mtask.Taskid] = InProgress
-	// 		*reply = mtask
-	// 	}
+
+	// assign map task
+	// if len(c.map_chan) > 0 {
+	// 	fmt.Printf("len of c.map_chan is %d", len(c.map_chan))
+	// 	*reply = *<-c.map_chan
+	// 	fmt.Printf(", taskstate[%d] is set\n", reply.Innerid)
+	// 	c.taskStatus[reply.Innerid] = InProgress
+	// 	return nil
 	// }
 
+	// Try to assign a map task
+	select {
+	case task := <-c.map_chan:
+		*reply = *task
+		c.taskStatus[reply.Innerid] = InProgress
+		// fmt.Printf("Assigned map task %d\n", reply.Innerid)
+		return nil
+	default:
+		// No map task available
+	}
+
+	// Check if all map tasks are done
+	allMapTasksDone := true
+	for i := 0; i < len(c.mapTasks); i++ {
+		if c.taskStatus[i] != Completed {
+			allMapTasksDone = false
+			break
+		}
+	}
+
+	if !allMapTasksDone {
+		args.Stat = Waiting
+		return nil
+	} else {
+		args.Stat = Ready
+	}
+
 	// assign reduce task
-	if len(c.reduce_chan) > 0 {
+	if len(c.reduce_chan) > 0 && allMapTasksDone {
+		fmt.Printf("len of c.recude_chan is %d", len(c.reduce_chan))
 		*reply = *<-c.reduce_chan
-		c.taskStatus[reply.Taskid] = InProgress
+		fmt.Printf(", taskstate[%d] is set \n", reply.Innerid+len(c.mapTasks))
+		c.taskStatus[reply.Innerid+len(c.mapTasks)] = InProgress
 		return nil
 	}
-	// for _, rtask := range c.reduceTasks {
-	// 	if c.taskStatus[rtask.Taskid] == Unassigned {
-	// 		c.taskStatus[rtask.Taskid] = InProgress
-	// 		*reply = rtask
-	// 	}
-	// }
+
+	c.isDone = true
+	return nil
+}
+
+func (c *Coordinator) TaskiFinish(args *TaskInfo, reply *ExampleReply) error {
+	c.state_lock.Lock()
+	defer c.state_lock.Unlock()
+	c.taskStatus[args.Taskid] = Completed
 	return nil
 }
 
@@ -98,6 +135,8 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.state_lock.Lock()
+	defer c.state_lock.Unlock()
 	ret := true
 
 	// Your code here.
@@ -121,7 +160,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		map_chan:    make(chan *Task, len(files)),
 		reduce_chan: make(chan *Task, nReduce),
 		taskStatus:  make(map[int]TaskState),
-		task_cnt:    0,
+		worker_cnt:  0,
 		isDone:      false,
 	}
 
@@ -132,22 +171,23 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			Type_id:  0,
 			Filename: filename,
 			Innerid:  i,
-			Taskid:   c.next_task_id(),
+			Workerid: 0,
 			NReduce:  nReduce,
 		}
-		c.taskStatus[c.mapTasks[i].Taskid] = Unassigned
+		c.taskStatus[i] = Unassigned
 		c.map_chan <- &c.mapTasks[i]
 	}
 
 	// init reduce tasks
 	for i := 0; i < nReduce; i++ {
 		c.reduceTasks[i] = Task{
-			Type_id: 1,
-			Taskid:  c.next_task_id(),
-			Innerid: i,
-			NReduce: nReduce,
+			Type_id:  1,
+			Filename: "",
+			Workerid: 0,
+			Innerid:  i,
+			NReduce:  nReduce,
 		}
-		c.taskStatus[c.reduceTasks[i].Taskid] = Unassigned
+		c.taskStatus[i+len(c.mapTasks)] = Unassigned
 		c.reduce_chan <- &c.reduceTasks[i]
 	}
 

@@ -25,12 +25,29 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type WorkerStat int
+
+const (
+	Ready WorkerStat = iota
+	Waiting
+	Notask
+)
+
+type WorkerMeta struct {
+	Workerid int
+	Stat     WorkerStat
+}
+
+type TaskInfo struct {
+	Type_id int
+	Taskid  int
+}
 
 type Task struct {
 	// type = 0: map, 1: reduce
 	Type_id  int
 	Filename string
-	Taskid   int // id of all tasks
+	Workerid int // id of all tasks
 	Innerid  int // id of Map/Reduce tasks
 	NReduce  int
 }
