@@ -52,6 +52,11 @@ type Task struct {
 	NReduce  int
 }
 
+type TaskMeta struct {
+	Task       Task
+	Workermeta WorkerMeta
+}
+
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
 // Can't use the current directory since

@@ -37,13 +37,13 @@ func (c *Coordinator) next_worker_id() int {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *Task) error {
+func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *TaskMeta) error {
 	// hold the big lock
 	c.state_lock.Lock()
 	if c.isDone {
 		// fmt.Println("c.isDone")
-		args.Stat = Notask
-		fmt.Printf("args.Stat is %d\n", args.Stat)
+		reply.Workermeta.Stat = Notask
+		fmt.Printf("args.Stat is %d\n", reply.Workermeta.Stat)
 		c.state_lock.Unlock()
 		return nil
 	}
@@ -51,7 +51,7 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *Task) error {
 
 	// assign worker id
 	if args.Workerid == 0 {
-		args.Workerid = c.next_worker_id()
+		reply.Workermeta.Workerid = c.next_worker_id()
 	}
 
 	// assign map task
@@ -66,8 +66,8 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *Task) error {
 	// Try to assign a map task
 	select {
 	case task := <-c.map_chan:
-		*reply = *task
-		c.taskStatus[reply.Innerid] = InProgress
+		reply.Task = *task
+		c.taskStatus[reply.Task.Innerid] = InProgress
 		// fmt.Printf("Assigned map task %d\n", reply.Innerid)
 		return nil
 	default:
@@ -84,18 +84,20 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *Task) error {
 	}
 
 	if !allMapTasksDone {
-		args.Stat = Waiting
+		fmt.Printf("\n=== some map unfinished , worker %d is waiting ===\n", args.Workerid)
+		reply.Workermeta.Stat = Waiting
 		return nil
 	} else {
-		args.Stat = Ready
+		fmt.Printf("\n===== all map finished , worker %d is ready ===\n", args.Workerid)
+		reply.Workermeta.Stat = Ready
 	}
 
 	// assign reduce task
 	if len(c.reduce_chan) > 0 && allMapTasksDone {
 		fmt.Printf("len of c.recude_chan is %d", len(c.reduce_chan))
-		*reply = *<-c.reduce_chan
-		fmt.Printf(", taskstate[%d] is set \n", reply.Innerid+len(c.mapTasks))
-		c.taskStatus[reply.Innerid+len(c.mapTasks)] = InProgress
+		reply.Task = *<-c.reduce_chan
+		fmt.Printf(", taskstate[%d] is set, workerid is %d, reduceid is %d\n", reply.Task.Innerid+len(c.mapTasks), args.Workerid, reply.Task.Innerid)
+		c.taskStatus[reply.Task.Innerid+len(c.mapTasks)] = InProgress
 		return nil
 	}
 

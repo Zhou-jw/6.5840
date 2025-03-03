@@ -37,7 +37,7 @@ func ihash(key string) int {
 func DoReduce(reducef func(string, []string) string, task *Task) error {
 	var intermediate []KeyValue
 	reduceid := task.Innerid
-	fmt.Printf("reduce id is %d\n", reduceid)
+	fmt.Printf("reduce id is %d, worker.id is %d\n", reduceid, task.Workerid)
 
 	// match files to be reduced
 	pattern := fmt.Sprintf("mr-*-%d", reduceid)
@@ -92,7 +92,7 @@ func DoReduce(reducef func(string, []string) string, task *Task) error {
 func DoMap(mapf func(string, string) []KeyValue, task *Task) error {
 	var kva []KeyValue
 	nReduce := task.NReduce
-	fmt.Printf("nReduce is %d\n", nReduce)
+	fmt.Printf("nReduce is %d, worker.id is %d\n", nReduce, task.Workerid)
 	// read content of pg-*
 	filename := task.Filename
 	file, err := os.Open(filename)
@@ -135,32 +135,44 @@ func DoMap(mapf func(string, string) []KeyValue, task *Task) error {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-	meta := WorkerMeta{Workerid: 0, Stat: Ready}
-	var new_task = Task{}
-	for AskForTask(&meta, &new_task) {
-		if meta.Stat == Waiting {
+	var workerid = 0
+	for {
+		wmeta := WorkerMeta{Workerid: workerid, Stat: Ready}
+		var new_task = Task{}
+		var new_tmeta = TaskMeta{Task: new_task,
+			Workermeta: wmeta}
+		if !AskForTask(&wmeta, &new_tmeta) {
+			break
+		}
+		workerid = new_tmeta.Workermeta.Workerid
+		wmeta = new_tmeta.Workermeta
+		new_task = new_tmeta.Task
+		new_task.Workerid = workerid
+		if wmeta.Stat == Waiting {
 			// sleep for 1s
+			fmt.Printf("worker %d sleep 1s\n", wmeta.Workerid)
 			time.Sleep(time.Second)
+			continue
 		}
 		// Your worker implementation here.
 		if new_task.Type_id == 0 {
 			// Map worker
 			err := DoMap(mapf, &new_task)
 			if err != nil {
-				log.Printf("fail to map, worker.id is %d, taskid is %d\n", meta.Workerid, new_task.Innerid)
+				log.Printf("fail to map, worker.id is %d, taskid is %d\n", wmeta.Workerid, new_task.Innerid)
 			}
 			mtask_info := TaskInfo{Type_id: 0, Taskid: new_task.Innerid}
 			ok := call("Coordinator.TaskiFinish", &mtask_info, &ExampleReply{})
 			if ok {
-				log.Printf("maptask finished, worker.id is %d, taskid is %d", meta.Workerid, new_task.Innerid)
+				log.Printf("maptask finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
 			} else {
-				log.Printf("fail to tell coordinator maptask finished, worker.id is %d, taskid is %d", meta.Workerid, new_task.Innerid)
+				log.Printf("fail to tell coordinator maptask finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
 
 			}
 		} else {
 			err := DoReduce(reducef, &new_task)
 			if err != nil {
-				log.Printf("fail to reduce, worker.id is %d, taskid is %d\n", meta.Workerid, new_task.Innerid)
+				log.Printf("fail to reduce, worker.id is %d, taskid is %d\n", wmeta.Workerid, new_task.Innerid)
 			}
 		}
 	}
@@ -169,28 +181,23 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 }
 
-func AskForTask(meta *WorkerMeta, ret_task *Task) bool {
+func AskForTask(meta *WorkerMeta, ret_taskmeta *TaskMeta) bool {
 	// reduce_task := Task{}
-	metatmp := *meta
-	tasktmp := Task{}
+	// fmt.Printf("Task.Innerid is %d\n", ret_taskmeta.Task.Innerid)
+	ok := call("Coordinator.GiveTasks", &meta, &ret_taskmeta)
+	fmt.Printf("meta.Stat is %d\n", ret_taskmeta.Workermeta.Stat)
 
-	ok := call("Coordinator.GiveTasks", &metatmp, &tasktmp)
-	*meta = metatmp
-	*ret_task = tasktmp
-	fmt.Printf("meta.Stat is %d\n", meta.Stat)
-	fmt.Printf("metatmp.Stat is %d\n", metatmp.Stat)
-
-	if ok && meta.Stat == Ready {
-		if ret_task.Type_id == 0 {
-			fmt.Printf("ask for map task, task file: %v\n", ret_task.Filename)
+	if ok && ret_taskmeta.Workermeta.Stat == Ready {
+		if ret_taskmeta.Task.Type_id == 0 {
+			fmt.Printf("ask for map task, task file: %v\n", ret_taskmeta.Task.Filename)
 		} else {
-			fmt.Printf("ask for reduce task, task file: %v\n", ret_task.Filename)
+			fmt.Printf("ask for reduce task, task file: %v\n", ret_taskmeta.Task.Filename)
 		}
 	} else if !ok {
 		fmt.Printf("fail to ask for task\n")
 	}
 
-	if meta.Stat == Notask {
+	if ret_taskmeta.Workermeta.Stat == Notask {
 		fmt.Println("Notask")
 		return false
 	}
