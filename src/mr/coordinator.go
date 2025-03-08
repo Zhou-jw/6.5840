@@ -108,7 +108,11 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *TaskMeta) error {
 func (c *Coordinator) TaskiFinish(args *TaskInfo, reply *ExampleReply) error {
 	c.state_lock.Lock()
 	defer c.state_lock.Unlock()
-	c.taskStatus[args.Taskid] = Completed
+	if args.Type_id == 0 {
+		c.taskStatus[args.Taskid] = Completed
+	} else {
+		c.taskStatus[len(c.mapTasks)+args.Taskid] = Completed
+	}
 	return nil
 }
 

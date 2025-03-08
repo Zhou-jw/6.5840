@@ -112,7 +112,6 @@ fi
 
 # wait for remaining workers and coordinator to exit.
 wait
-exit
 #########################################################
 # now indexer
 rm -f mr-*
@@ -278,8 +277,8 @@ else
   echo '---' early exit test: FAIL
   failed_any=1
 fi
+exit 
 rm -f mr-*
-
 #########################################################
 echo '***' Starting crash test.
 

@@ -174,6 +174,14 @@ func Worker(mapf func(string, string) []KeyValue,
 			if err != nil {
 				log.Printf("fail to reduce, worker.id is %d, taskid is %d\n", wmeta.Workerid, new_task.Innerid)
 			}
+			mtask_info := TaskInfo{Type_id: 1, Taskid: new_task.Innerid}
+			ok := call("Coordinator.TaskiFinish", &mtask_info, &ExampleReply{})
+			if ok {
+				log.Printf("reduce task finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
+			} else {
+				log.Printf("fail to tell coordinator maptask finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
+
+			}
 		}
 	}
 
