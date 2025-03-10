@@ -9,6 +9,7 @@ package mr
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 //
@@ -30,7 +31,7 @@ type WorkerStat int
 const (
 	Ready WorkerStat = iota
 	Waiting
-	Notask
+	PleaseExit
 )
 
 type WorkerMeta struct {
@@ -38,14 +39,32 @@ type WorkerMeta struct {
 	Stat     WorkerStat
 }
 
+type TaskType int
+
+const (
+	MapTask TaskType = iota
+	ReduceTask
+	ExitTask
+)
+
+type TaskState int
+
+const (
+	Unassigned TaskState = iota
+	InProgress
+	Completed
+)
+
 type TaskInfo struct {
-	Type_id int
-	Taskid  int
+	TaskType  TaskType
+	Taskid    int
+	State TaskState
+	StartTime time.Time
 }
 
 type Task struct {
 	// type = 0: map, 1: reduce
-	Type_id  int
+	TaskType TaskType
 	Filename string
 	Workerid int // id of all tasks
 	Innerid  int // id of Map/Reduce tasks

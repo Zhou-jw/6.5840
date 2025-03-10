@@ -9,14 +9,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-)
-
-type TaskState int
-
-const (
-	Unassigned TaskState = iota
-	InProgress
-	Completed
+	"time"
 )
 
 type Coordinator struct {
@@ -28,7 +21,7 @@ type Coordinator struct {
 	reduce_chan chan *Task
 	// workers     []chan *Task
 	worker_cnt int64
-	taskStatus map[int]TaskState
+	taskinfo   map[int]*TaskInfo
 	isDone     bool
 }
 
@@ -42,7 +35,7 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *TaskMeta) error {
 	c.state_lock.Lock()
 	if c.isDone {
 		// fmt.Println("c.isDone")
-		reply.Workermeta.Stat = Notask
+		reply.Workermeta.Stat = PleaseExit
 		fmt.Printf("args.Stat is %d\n", reply.Workermeta.Stat)
 		c.state_lock.Unlock()
 		return nil
@@ -54,20 +47,11 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *TaskMeta) error {
 		reply.Workermeta.Workerid = c.next_worker_id()
 	}
 
-	// assign map task
-	// if len(c.map_chan) > 0 {
-	// 	fmt.Printf("len of c.map_chan is %d", len(c.map_chan))
-	// 	*reply = *<-c.map_chan
-	// 	fmt.Printf(", taskstate[%d] is set\n", reply.Innerid)
-	// 	c.taskStatus[reply.Innerid] = InProgress
-	// 	return nil
-	// }
-
 	// Try to assign a map task
 	select {
 	case task := <-c.map_chan:
 		reply.Task = *task
-		c.taskStatus[reply.Task.Innerid] = InProgress
+		c.taskinfo[reply.Task.Innerid].State = InProgress
 		// fmt.Printf("Assigned map task %d\n", reply.Innerid)
 		return nil
 	default:
@@ -77,18 +61,18 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *TaskMeta) error {
 	// Check if all map tasks are done
 	allMapTasksDone := true
 	for i := 0; i < len(c.mapTasks); i++ {
-		if c.taskStatus[i] != Completed {
+		if c.taskinfo[i].State != Completed {
 			allMapTasksDone = false
 			break
 		}
 	}
 
 	if !allMapTasksDone {
-		fmt.Printf("\n=== some map unfinished , worker %d is waiting ===\n", args.Workerid)
+		fmt.Printf("\n=== worker %d is waiting, some map unfinished ===\n", args.Workerid)
 		reply.Workermeta.Stat = Waiting
 		return nil
 	} else {
-		fmt.Printf("\n===== all map finished , worker %d is ready ===\n", args.Workerid)
+		fmt.Printf("\n===== worker %d is ready from waiting ===\n", args.Workerid)
 		reply.Workermeta.Stat = Ready
 	}
 
@@ -97,21 +81,22 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *TaskMeta) error {
 		fmt.Printf("len of c.recude_chan is %d", len(c.reduce_chan))
 		reply.Task = *<-c.reduce_chan
 		fmt.Printf(", taskstate[%d] is set, workerid is %d, reduceid is %d\n", reply.Task.Innerid+len(c.mapTasks), args.Workerid, reply.Task.Innerid)
-		c.taskStatus[reply.Task.Innerid+len(c.mapTasks)] = InProgress
+		c.taskinfo[reply.Task.Innerid+len(c.mapTasks)].State = InProgress
 		return nil
 	}
 
-	c.isDone = true
+	reply.Workermeta.Stat = Waiting
+
 	return nil
 }
 
 func (c *Coordinator) TaskiFinish(args *TaskInfo, reply *ExampleReply) error {
 	c.state_lock.Lock()
 	defer c.state_lock.Unlock()
-	if args.Type_id == 0 {
-		c.taskStatus[args.Taskid] = Completed
+	if args.TaskType == MapTask {
+		c.taskinfo[args.Taskid].State = Completed
 	} else {
-		c.taskStatus[len(c.mapTasks)+args.Taskid] = Completed
+		c.taskinfo[len(c.mapTasks)+args.Taskid].State = Completed
 	}
 	return nil
 }
@@ -122,6 +107,24 @@ func (c *Coordinator) TaskiFinish(args *TaskInfo, reply *ExampleReply) error {
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
+}
+
+// restart failed tasks
+func (c *Coordinator) restart_failed_tasks() {
+	for {
+		time.Sleep(time.Second * 2)
+		c.state_lock.Lock()
+		if c.isDone {
+			c.state_lock.Unlock()
+			break
+		}
+
+		for _, info := range c.taskinfo {
+			if info.State == InProgress && time.Since(info.StartTime) > 9*time.Second {
+
+			}
+		}
+	}
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -144,11 +147,14 @@ func (c *Coordinator) Done() bool {
 	c.state_lock.Lock()
 	defer c.state_lock.Unlock()
 	ret := true
+	c.isDone = true
 
 	// Your code here.
-	for _, state := range c.taskStatus {
-		if state != Completed {
+	for _, info := range c.taskinfo {
+		if info.State != Completed {
 			ret = false
+			c.isDone = false
+			break
 		}
 	}
 
@@ -165,7 +171,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		reduceTasks: make([]Task, nReduce),
 		map_chan:    make(chan *Task, len(files)),
 		reduce_chan: make(chan *Task, nReduce),
-		taskStatus:  make(map[int]TaskState),
+		taskinfo:    make(map[int]*TaskInfo, len(files)+nReduce),
 		worker_cnt:  0,
 		isDone:      false,
 	}
@@ -174,26 +180,26 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// init map tasks
 	for i, filename := range files {
 		c.mapTasks[i] = Task{
-			Type_id:  0,
+			TaskType: MapTask,
 			Filename: filename,
 			Innerid:  i,
 			Workerid: 0,
 			NReduce:  nReduce,
 		}
-		c.taskStatus[i] = Unassigned
+		c.taskinfo[i].State = Unassigned
 		c.map_chan <- &c.mapTasks[i]
 	}
 
 	// init reduce tasks
 	for i := 0; i < nReduce; i++ {
 		c.reduceTasks[i] = Task{
-			Type_id:  1,
+			TaskType: ReduceTask,
 			Filename: "",
 			Workerid: 0,
 			Innerid:  i,
 			NReduce:  nReduce,
 		}
-		c.taskStatus[i+len(c.mapTasks)] = Unassigned
+		c.taskinfo[i+len(c.mapTasks)].State = Unassigned
 		c.reduce_chan <- &c.reduceTasks[i]
 	}
 

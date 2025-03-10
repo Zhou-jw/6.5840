@@ -142,6 +142,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		var new_tmeta = TaskMeta{Task: new_task,
 			Workermeta: wmeta}
 		if !AskForTask(&wmeta, &new_tmeta) {
+			fmt.Printf("worker %d exit", wmeta.Workerid)
 			break
 		}
 		workerid = new_tmeta.Workermeta.Workerid
@@ -155,13 +156,13 @@ func Worker(mapf func(string, string) []KeyValue,
 			continue
 		}
 		// Your worker implementation here.
-		if new_task.Type_id == 0 {
+		if new_task.TaskType == MapTask {
 			// Map worker
 			err := DoMap(mapf, &new_task)
 			if err != nil {
 				log.Printf("fail to map, worker.id is %d, taskid is %d\n", wmeta.Workerid, new_task.Innerid)
 			}
-			mtask_info := TaskInfo{Type_id: 0, Taskid: new_task.Innerid}
+			mtask_info := TaskInfo{TaskType: MapTask, Taskid: new_task.Innerid}
 			ok := call("Coordinator.TaskiFinish", &mtask_info, &ExampleReply{})
 			if ok {
 				log.Printf("maptask finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
@@ -174,7 +175,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			if err != nil {
 				log.Printf("fail to reduce, worker.id is %d, taskid is %d\n", wmeta.Workerid, new_task.Innerid)
 			}
-			mtask_info := TaskInfo{Type_id: 1, Taskid: new_task.Innerid}
+			mtask_info := TaskInfo{TaskType: ReduceTask, Taskid: new_task.Innerid}
 			ok := call("Coordinator.TaskiFinish", &mtask_info, &ExampleReply{})
 			if ok {
 				log.Printf("reduce task finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
@@ -196,17 +197,18 @@ func AskForTask(meta *WorkerMeta, ret_taskmeta *TaskMeta) bool {
 	fmt.Printf("meta.Stat is %d\n", ret_taskmeta.Workermeta.Stat)
 
 	if ok && ret_taskmeta.Workermeta.Stat == Ready {
-		if ret_taskmeta.Task.Type_id == 0 {
+		if ret_taskmeta.Task.TaskType == MapTask {
 			fmt.Printf("ask for map task, task file: %v\n", ret_taskmeta.Task.Filename)
 		} else {
 			fmt.Printf("ask for reduce task, task file: %v\n", ret_taskmeta.Task.Filename)
 		}
 	} else if !ok {
 		fmt.Printf("fail to ask for task\n")
+		return false;
 	}
 
-	if ret_taskmeta.Workermeta.Stat == Notask {
-		fmt.Println("Notask")
+	if ret_taskmeta.Workermeta.Stat == PleaseExit {
+		fmt.Printf("worker %d Notask left \n", meta.Workerid)
 		return false
 	}
 
