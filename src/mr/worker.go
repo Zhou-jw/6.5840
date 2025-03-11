@@ -180,7 +180,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			if ok {
 				log.Printf("reduce task finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
 			} else {
-				log.Printf("fail to tell coordinator maptask finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
+				log.Printf("fail to tell coordinator reduce finished, worker.id is %d, taskid is %d", wmeta.Workerid, new_task.Innerid)
 
 			}
 		}

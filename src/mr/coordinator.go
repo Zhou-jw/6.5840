@@ -51,6 +51,7 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *TaskMeta) error {
 	select {
 	case task := <-c.map_chan:
 		reply.Task = *task
+		c.taskinfo[reply.Task.Innerid].StartTime = time.Now()
 		c.taskinfo[reply.Task.Innerid].State = InProgress
 		// fmt.Printf("Assigned map task %d\n", reply.Innerid)
 		return nil
@@ -81,6 +82,7 @@ func (c *Coordinator) GiveTasks(args *WorkerMeta, reply *TaskMeta) error {
 		fmt.Printf("len of c.recude_chan is %d", len(c.reduce_chan))
 		reply.Task = *<-c.reduce_chan
 		fmt.Printf(", taskstate[%d] is set, workerid is %d, reduceid is %d\n", reply.Task.Innerid+len(c.mapTasks), args.Workerid, reply.Task.Innerid)
+		c.taskinfo[reply.Task.Innerid+len(c.mapTasks)].StartTime = time.Now()
 		c.taskinfo[reply.Task.Innerid+len(c.mapTasks)].State = InProgress
 		return nil
 	}
@@ -119,11 +121,30 @@ func (c *Coordinator) restart_failed_tasks() {
 			break
 		}
 
+		var finishedtasks []int
 		for _, info := range c.taskinfo {
 			if info.State == InProgress && time.Since(info.StartTime) > 9*time.Second {
+				fmt.Printf("task %d crashed, take %.2f s\n", info.Taskid, time.Since(info.StartTime).Seconds())
 
+				switch info.TaskType {
+				case MapTask:
+					c.taskinfo[info.Taskid].State = Unassigned
+					c.map_chan <- &c.mapTasks[info.Taskid]
+				case ReduceTask:
+					c.taskinfo[info.Taskid].State = Unassigned
+					c.reduce_chan <- &c.reduceTasks[info.Taskid-len(c.mapTasks)]
+				}
+			}
+			if info.State == Completed {
+				finishedtasks = append(finishedtasks, info.Taskid)
 			}
 		}
+		c.state_lock.Unlock()
+		fmt.Print("task")
+		for _, id := range finishedtasks {
+			fmt.Printf(" %d", id)
+		}
+		fmt.Println(" is done")
 	}
 }
 
@@ -186,7 +207,14 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			Workerid: 0,
 			NReduce:  nReduce,
 		}
-		c.taskinfo[i].State = Unassigned
+		taskinfo := &TaskInfo{
+			TaskType:  MapTask,
+			Taskid:    i,
+			State:     Unassigned,
+			StartTime: time.Now(),
+		}
+
+		c.taskinfo[i] = taskinfo
 		c.map_chan <- &c.mapTasks[i]
 	}
 
@@ -199,9 +227,17 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			Innerid:  i,
 			NReduce:  nReduce,
 		}
-		c.taskinfo[i+len(c.mapTasks)].State = Unassigned
+		taskinfo := &TaskInfo{
+			TaskType:  ReduceTask,
+			Taskid:    i + len(c.mapTasks),
+			State:     Unassigned,
+			StartTime: time.Now(),
+		}
+		c.taskinfo[taskinfo.Taskid] = taskinfo
 		c.reduce_chan <- &c.reduceTasks[i]
 	}
+
+	go c.restart_failed_tasks()
 
 	c.server()
 	return &c
