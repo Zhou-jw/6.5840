@@ -39,6 +39,16 @@
                 // "wc.so"
             ],
             "program": "${workspaceFolder}/src/main/mrworker.go"
+        },
+        {
+            "name": "kvsrv_test",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "cwd": "${workspaceFolder}/src/kvsrv1/",
+            "args": [
+            ],
+            "program": "${workspaceFolder}/src/kvsrv1/kvsrv_test.go"
         }
     ]
 }
