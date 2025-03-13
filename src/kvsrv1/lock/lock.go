@@ -37,17 +37,27 @@ func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 func (lk *Lock) Acquire() {
 	// Your code here
 	for {
-		val, ver, err:= lk.ck.Get(lk.lock_key)
+		val, ver, err := lk.ck.Get(lk.lock_key)
 
-		if val == "" || err == rpc.ErrNoKey{
+		// already hold lock
+		if val == lk.id && err == rpc.OK {
+			// log.Printf("%s already gets lock", lk.id)
+			return
+		}
+
+		// no one holds lock
+		if val == "" || err == rpc.ErrNoKey {
 			err = lk.ck.Put(lk.lock_key, lk.id, ver)
 			if err == rpc.OK {
-				// log.Printf("%s gets lock\n", lk.id)
-				return 
+				// log.Printf("%s gets lock, with val: %s, ver: %d\n", lk.id, val, ver)
+				return
 			}
+			// log.Printf("%s try lock, ver: %d, err: %v\n", lk.id, ver, err)
+			// if err == ErrMaybe ,then try acquire again
 		}
 
 		// sleep for a while
+		// log.Printf("%s will sleep to reacquire lock, lock_key is %s\n", lk.id, lk.lock_key)
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -58,20 +68,26 @@ func (lk *Lock) Release() {
 	for {
 		val, ver, err := lk.ck.Get(lk.lock_key)
 		if err != rpc.OK {
-			panic("fail to check lock state\n")
+			panic("try to release unholded lock\n")
 		}
 
-		if val != lk.lock_key {
-			// log.Printf("try to release other's lock\n")
+		if val != lk.id && val != "" {
+			// log.Printf("%s try to release %s's lock\n", lk.id, val)
 			time.Sleep(10 * time.Millisecond)
 		}
 
 		if val != "" {
 			err = lk.ck.Put(lk.lock_key, "", ver)
-			if err == rpc.OK {
-				// log.Printf("%s unlock\n", lk.id)
-				return 
+			if err == rpc.OK || err == rpc.ErrMaybe {
+				// log.Printf("%s unlock, with val: %s, ver: %d, err: %v\n\n", lk.id, val, ver, err)
+				return
 			}
+			// log.Printf("%s try to unlock, with val%s, err: %v\n", lk.id, val, err)
+		} else {
+			// log.Printf("%s unlock, with val: %s\n\n", lk.id, val)
+			return
 		}
+
+		time.Sleep(10 * time.Millisecond)
 	}
 }
