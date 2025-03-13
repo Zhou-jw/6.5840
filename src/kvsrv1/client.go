@@ -1,7 +1,8 @@
 package kvsrv
 
 import (
-	"fmt"
+	// "log"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
@@ -33,12 +34,15 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
 	args := rpc.GetArgs{Key: key}
 	reply := rpc.GetReply{}
-	ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
-
-	if ok {
-		return reply.Value, reply.Version, reply.Err
+	for {
+		ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
+		if ok {
+			return reply.Value, reply.Version, reply.Err
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	return "", 0, rpc.ErrNoKey
+	// return "", 0, rpc.ErrNoKey
+
 }
 
 // Put updates key with value only if the version in the
@@ -66,11 +70,18 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 		Version: version,
 	}
 	reply := rpc.PutReply{}
-	ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
-	if ok {
-		return reply.Err
-	} else {
-		fmt.Println("fail to call KVServer.Put")
+	resent := false
+	for {
+		// log.Printf("try to put key:%s, value: %s, ver: %d", key, value, version)
+		ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+		if ok {
+			if resent && reply.Err == rpc.ErrVersion {
+				return rpc.ErrMaybe
+			}
+			return reply.Err
+		}
+		resent = true
+		time.Sleep(100 * time.Millisecond)
 	}
-	return rpc.ErrNoKey
+	// return rpc.ErrNoKey
 }

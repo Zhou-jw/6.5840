@@ -63,8 +63,8 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	kv.rw.Lock()
 	defer kv.rw.Unlock()
 
-	valueVer, is_exist := kv.mapinner[args.Key]
-	if !is_exist {
+	valueVer, is_existed := kv.mapinner[args.Key]
+	if !is_existed {
 		switch args.Version {
 		case 0:
 			kv.mapinner[args.Key] = ValueVer{
