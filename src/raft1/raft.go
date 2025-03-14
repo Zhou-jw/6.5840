@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -26,9 +27,8 @@ import (
 
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
-
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -51,6 +51,29 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type LogEntry struct {
+	Term  int
+	Index int
+}
+
+func (rf *Raft) LastLogEntry() LogEntry {
+	if len(rf.log) == 0 {
+		return LogEntry{
+			Term:  0,
+			Index: 0,
+		}
+	}
+	return rf.log[len(rf.log)-1]
+}
+
+type State int
+
+const (
+	Leader State = iota
+	Candidate
+	Follower
+)
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -63,6 +86,21 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	state        State
+	electionTime time.Time
+
+	// Persistent state
+	currentTerm int
+	votedFor    int // candidateId that received vote in current term(or null if none)
+	log         []LogEntry
+
+	// Volatile state on all servers
+	commitIndex int
+	LastApplied int
+
+	// Volatile state on leaders
+	nextIndex  []int
+	matchIndex []int
 }
 
 // return currentTerm and whether this server
@@ -72,6 +110,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	term = rf.currentTerm
+	isleader = (rf.state == Leader)
 	return term, isleader
 }
 
@@ -93,7 +133,6 @@ func (rf *Raft) persist() {
 	// rf.persister.Save(raftstate, nil)
 }
 
-
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -114,7 +153,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -124,22 +162,50 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	// candidate's term
+	Term int
+	// candidate requesting vote
+	CandidateID int
+	// index of candidate's last log entry
+	LastLogIndex int
+	// term of candidate's last log entry
+	LastLogTerm int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	// current term, for candidate to update itself
+	Term int
+	//true means received vote
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		mylastlog := rf.LastLogEntry()
+		uptodate := args.LastLogTerm > mylastlog.Term || (args.LastLogTerm == mylastlog.Term && args.LastLogIndex >= mylastlog.Index)
+		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && uptodate {
+			reply.VoteGranted = true
+		}
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -174,7 +240,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -193,7 +258,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
-
 
 	return index, term, isLeader
 }
@@ -217,12 +281,169 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) reset_ele_time() {
+	// pause for a random amount of time between 1000ms and 2000s
+	ms := 1000 + (rand.Int63() % 1000)
+	rf.electionTime = time.Now().Add(time.Duration(ms) * time.Millisecond)
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	log.Printf("server %d received heartbeats", rf.me)
+
+	// 5.1 if a server If a server receives a request with a stale term number,
+	// it rejects the request.
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		if rf.state == Candidate {
+			rf.state = Follower
+		}
+		rf.votedFor = -1
+	}
+
+	rf.reset_ele_time()
+	reply.Term = args.Term
+	reply.Success = true
+}
+
+func (rf *Raft) send_heartbeats_nolock() {
+
+	for id := range rf.peers {
+		if id == rf.me {
+			continue
+		}
+		args := AppendEntriesArgs{
+			Term:     rf.currentTerm,
+			LeaderId: rf.me,
+		}
+
+		reply := AppendEntriesReply{}
+		ok := rf.peers[id].Call("Raft.AppendEntries", &args, &reply)
+
+		if !ok {
+			log.Printf("server %d fail to send heartbeat to %d", rf.me, id)
+		}
+	}
+}
+
+func (rf *Raft) append_entries() {
+}
+
+func (rf *Raft) start_election() {
+	rf.mu.Lock()
+
+	rf.currentTerm += 1
+	rf.state = Candidate
+	rf.votedFor = rf.me
+	rf.reset_ele_time()
+	votecnt := 1
+	term := rf.currentTerm
+
+	rf.mu.Unlock()
+
+	// use channel to collect votes
+	vote_ch := make(chan bool, len(rf.peers)-1)
+
+	for id := range rf.peers {
+		if id == rf.me {
+			// vote for itself
+			continue
+		}
+		args := &RequestVoteArgs{}
+		args.CandidateID = rf.me
+		args.Term = term
+
+		// request votes from other servers
+		go rf.ask_votes(id, args, vote_ch)
+	}
+
+	// handle the votes result
+	for i := 0; i < len(rf.peers)-1; i++ {
+		granted := <-vote_ch
+		if granted {
+			votecnt++
+		}
+
+		rf.mu.Lock()
+		// state change when election, because received valid heartbeats from leader
+		if rf.state != Candidate {
+			rf.mu.Unlock()
+			return
+		}
+
+		if votecnt > len(rf.peers)/2 {
+			log.Printf("server %d become leader", rf.me)
+			rf.state = Leader
+			// return will sleep for at most 350ms, then others may become leaders, so send heartbeats at once
+			rf.send_heartbeats_nolock()
+			rf.mu.Unlock()
+			return
+		} else {
+			rf.votedFor = -1
+		}
+
+		rf.mu.Unlock()
+	}
+	electionTimeMS := rf.electionTime.Format("01:02.000")
+	log.Printf("server %d fail to be leader, reset ele time %s", rf.me, electionTimeMS)
+}
+
+func (rf *Raft) ask_votes(serverId int, args *RequestVoteArgs, voteCh chan<- bool) {
+
+	reply := &RequestVoteReply{}
+	ok := rf.peers[serverId].Call("Raft.RequestVote", args, reply)
+
+	if !ok {
+		voteCh <- false
+		log.Printf("server %d RequestVote to %d discarded", rf.me, serverId)
+		return
+	}
+
+	voteCh <- reply.VoteGranted
+	if reply.VoteGranted {
+		log.Printf("server %d received vote from %d", rf.me, serverId)
+	}
+
+}
+
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-
+		rf.mu.Lock()
+		if rf.state == Leader {
+			rf.send_heartbeats_nolock()
+			rf.mu.Unlock()
+		} else if time.Now().After(rf.electionTime) {
+			// election timeout, start election
+			log.Printf("server %d starts election", rf.me)
+			rf.mu.Unlock()
+			rf.start_election()
+		} else {
+			rf.mu.Unlock()
+		}
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -248,13 +469,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	rf.state = Follower
+	rf.reset_ele_time()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
