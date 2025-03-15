@@ -110,6 +110,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isleader = (rf.state == Leader)
 	return term, isleader
@@ -299,6 +301,8 @@ func (rf *Raft) reset_ele_time() {
 	// pause for a random amount of time between 1000ms and 2000s
 	ms := 1000 + (rand.Int63() % 1000)
 	rf.electionTime = time.Now().Add(time.Duration(ms) * time.Millisecond)
+	electionTimeMS := rf.electionTime.Format("15:04:05.000")
+	log.Printf("server %d reset ele time %s", rf.me, electionTimeMS)
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -316,7 +320,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		if rf.state == Candidate {
+		if rf.state != Follower {
 			rf.state = Follower
 		}
 		rf.votedFor = -1
@@ -338,12 +342,15 @@ func (rf *Raft) send_heartbeats_nolock() {
 			LeaderId: rf.me,
 		}
 
-		reply := AppendEntriesReply{}
-		ok := rf.peers[id].Call("Raft.AppendEntries", &args, &reply)
+		// send heartbeats in parallel
+		go func(leader int, peerid int, args *AppendEntriesArgs) {
+			reply := AppendEntriesReply{}
+			ok := rf.peers[peerid].Call("Raft.AppendEntries", args, &reply)
 
-		if !ok {
-			log.Printf("server %d fail to send heartbeat to %d", rf.me, id)
-		}
+			if !ok {
+				log.Printf("server %d fail to send heartbeat to %d", leader, id)
+			}
+		}(rf.me, id, &args)
 	}
 }
 
@@ -387,7 +394,7 @@ func (rf *Raft) start_election() {
 
 		rf.mu.Lock()
 		// state change when election, because received valid heartbeats from leader
-		if rf.state != Candidate {
+		if rf.state != Candidate || time.Now().After(rf.electionTime) {
 			rf.mu.Unlock()
 			return
 		}
@@ -405,7 +412,7 @@ func (rf *Raft) start_election() {
 
 		rf.mu.Unlock()
 	}
-	electionTimeMS := rf.electionTime.Format("01:02.000")
+	electionTimeMS := rf.electionTime.Format("15:04:05.000")
 	log.Printf("server %d fail to be leader, reset ele time %s", rf.me, electionTimeMS)
 }
 

@@ -10,6 +10,7 @@ package raft
 
 import (
 	"fmt"
+	"log"
 	// "log"
 	"math/rand"
 	"sync"
@@ -109,6 +110,7 @@ func TestManyElections3A(t *testing.T) {
 		ts.g.DisconnectAll(i1)
 		ts.g.DisconnectAll(i2)
 		ts.g.DisconnectAll(i3)
+		log.Printf("\n===== %d, %d, %d disconnected =====\n", i1, i2, i3)
 
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
