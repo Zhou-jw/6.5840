@@ -52,18 +52,23 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-	Term  int
-	Index int
+	Term int
+	// Index   int
+	Command interface{}
 }
 
-func (rf *Raft) LastLogEntry() LogEntry {
+type Log struct {
+	inner []LogEntry
+}
+
+func (rf *Raft) lastLogEntry() (int, LogEntry) {
 	if len(rf.log) == 0 {
-		return LogEntry{
-			Term:  0,
-			Index: 0,
+		return 0, LogEntry{
+			Term: 0,
 		}
 	}
-	return rf.log[len(rf.log)-1]
+	index := len(rf.log) - 1
+	return index, rf.log[index]
 }
 
 type State int
@@ -101,6 +106,8 @@ type Raft struct {
 	// Volatile state on leaders
 	nextIndex  []int
 	matchIndex []int
+
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -202,8 +209,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if args.Term > rf.currentTerm {
-		mylastlog := rf.LastLogEntry()
-		uptodate := args.LastLogTerm > mylastlog.Term || (args.LastLogTerm == mylastlog.Term && args.LastLogIndex >= mylastlog.Index)
+		lastlogidx, mylastlog := rf.lastLogEntry()
+		uptodate := args.LastLogTerm > mylastlog.Term || (args.LastLogTerm == mylastlog.Term && args.LastLogIndex >= lastlogidx)
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && uptodate {
 			reply.VoteGranted = true
 		}
@@ -260,8 +267,80 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return index, term, false
+	}
+
+	entry := LogEntry{
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+	rf.log = append(rf.log, entry)
+	rf.mu.Unlock()
+	go rf.start_agreement()
 
 	return index, term, isLeader
+}
+
+func (rf *Raft) append_entry_nolock() {
+	// send heartbeats in parallel
+	append_ch := make(chan bool, len(rf.peers)-1)
+	lastidx, lastlog := rf.lastLogEntry()
+	for id, _ := range rf.peers {
+		if id == rf.me {
+			continue
+		}
+		nextidx := rf.nextIndex[id]
+		prevlog := rf.log[nextidx-1]
+
+		if lastidx < nextidx {
+			continue
+		}
+		args := &AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: nextidx - 1,
+			PrevLogTerm:  prevlog.Term,
+			Entries:      make([]LogEntry, lastidx-nextidx+1),
+		}
+		copy(args.Entries, rf.log[nextidx:lastidx+1])
+
+		go rf.send_entry_to_peer(rf.me, args, append_ch)
+
+	}
+}
+
+func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs, appendCh chan<- bool) {
+	reply := AppendEntriesReply{}
+	ok := rf.peers[peerid].Call("Raft.AppendEntries", args, &reply)
+
+	if !ok {
+		log.Printf("server %d fail to send heartbeat to %d", rf.me, peerid)
+		return
+	}
+
+	// handle reply
+	if reply.Success {
+		rf.nextIndex[peerid] = args.PrevLogIndex + 2
+		rf.matchIndex[peerid] = args.PrevLogIndex
+		return
+	}
+
+	// if rpc reply.term > currentTerm
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.state = Follower
+		return
+	}
+	// reply fails because of log inconsistency, decrease nextindex of peerid
+	rf.nextIndex[peerid] -= 1
+}
+
+func (rf *Raft) start_agreement() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -318,6 +397,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		//truncate the inconsistent logs
+		rf.log = rf.log[:args.PrevLogIndex]
+		//append entries to it
+		rf.log = append(rf.log, args.Entries...)
+	}
+
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		if rf.state != Follower {
@@ -337,7 +429,8 @@ func (rf *Raft) send_heartbeats_nolock() {
 		if id == rf.me {
 			continue
 		}
-		args := AppendEntriesArgs{
+
+		heartbeats := &AppendEntriesArgs{
 			Term:     rf.currentTerm,
 			LeaderId: rf.me,
 		}
@@ -350,11 +443,8 @@ func (rf *Raft) send_heartbeats_nolock() {
 			if !ok {
 				log.Printf("server %d fail to send heartbeat to %d", leader, id)
 			}
-		}(rf.me, id, &args)
+		}(rf.me, id, heartbeats)
 	}
-}
-
-func (rf *Raft) append_entries() {
 }
 
 func (rf *Raft) start_election() {
@@ -441,6 +531,7 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		rf.mu.Lock()
 		if rf.state == Leader {
+			// send heartbeats
 			rf.send_heartbeats_nolock()
 			rf.mu.Unlock()
 		} else if time.Now().After(rf.electionTime) {
@@ -477,6 +568,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.state = Follower
+	rf.applyCh = applyCh
 	rf.reset_ele_time()
 
 	// initialize from state persisted before a crash
