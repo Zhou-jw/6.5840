@@ -57,10 +57,6 @@ type LogEntry struct {
 	Command interface{}
 }
 
-type Log struct {
-	inner []LogEntry
-}
-
 func (rf *Raft) lastLogEntry() (int, LogEntry) {
 	if len(rf.log) == 0 {
 		return 0, LogEntry{
@@ -195,6 +191,11 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+func (rf *Raft) convert_to_follower() {
+	rf.state = Follower
+	rf.votedFor = -1
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
@@ -209,9 +210,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if args.Term > rf.currentTerm {
+
+		rf.currentTerm = args.Term
+		rf.convert_to_follower()
+
 		lastlogidx, mylastlog := rf.lastLogEntry()
 		uptodate := args.LastLogTerm > mylastlog.Term || (args.LastLogTerm == mylastlog.Term && args.LastLogIndex >= lastlogidx)
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && uptodate {
+			rf.votedFor = args.CandidateID
 			reply.VoteGranted = true
 		}
 	}
@@ -278,69 +284,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, entry)
+	rf.append_entry_nolock()
 	rf.mu.Unlock()
-	go rf.start_agreement()
 
 	return index, term, isLeader
-}
-
-func (rf *Raft) append_entry_nolock() {
-	// send heartbeats in parallel
-	append_ch := make(chan bool, len(rf.peers)-1)
-	lastidx, lastlog := rf.lastLogEntry()
-	for id, _ := range rf.peers {
-		if id == rf.me {
-			continue
-		}
-		nextidx := rf.nextIndex[id]
-		prevlog := rf.log[nextidx-1]
-
-		if lastidx < nextidx {
-			continue
-		}
-		args := &AppendEntriesArgs{
-			Term:         rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: nextidx - 1,
-			PrevLogTerm:  prevlog.Term,
-			Entries:      make([]LogEntry, lastidx-nextidx+1),
-		}
-		copy(args.Entries, rf.log[nextidx:lastidx+1])
-
-		go rf.send_entry_to_peer(rf.me, args, append_ch)
-
-	}
-}
-
-func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs, appendCh chan<- bool) {
-	reply := AppendEntriesReply{}
-	ok := rf.peers[peerid].Call("Raft.AppendEntries", args, &reply)
-
-	if !ok {
-		log.Printf("server %d fail to send heartbeat to %d", rf.me, peerid)
-		return
-	}
-
-	// handle reply
-	if reply.Success {
-		rf.nextIndex[peerid] = args.PrevLogIndex + 2
-		rf.matchIndex[peerid] = args.PrevLogIndex
-		return
-	}
-
-	// if rpc reply.term > currentTerm
-	if reply.Term > rf.currentTerm {
-		rf.currentTerm = reply.Term
-		rf.state = Follower
-		return
-	}
-	// reply fails because of log inconsistency, decrease nextindex of peerid
-	rf.nextIndex[peerid] -= 1
-}
-
-func (rf *Raft) start_agreement() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -384,38 +331,109 @@ func (rf *Raft) reset_ele_time() {
 	log.Printf("server %d reset ele time %s", rf.me, electionTimeMS)
 }
 
+func (rf *Raft) append_entry_nolock() {
+	// send heartbeats in parallel
+	append_ch := make(chan bool, len(rf.peers)-1)
+	lastidx, _ := rf.lastLogEntry()
+	for id := range rf.peers {
+		if id == rf.me {
+			continue
+		}
+		nextidx := rf.nextIndex[id]
+		prevlog := rf.log[nextidx-1]
+
+		args := &AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: nextidx - 1,
+			PrevLogTerm:  prevlog.Term,
+		}
+
+		if lastidx-nextidx >= 0 {
+			args.Entries = make([]LogEntry, lastidx-nextidx+1)
+			copy(args.Entries, rf.log[nextidx:lastidx+1])
+		}
+
+		go rf.send_entry_to_peer(id, args, append_ch)
+
+	}
+}
+
+func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs, appendCh chan<- bool) {
+	reply := AppendEntriesReply{}
+	log.Printf("server %d try to send heartbeat to %d, index %d, term %d", rf.me, peerid, args.PrevLogIndex, args.Term)
+	ok := rf.peers[peerid].Call("Raft.AppendEntries", args, &reply)
+
+	if !ok {
+		log.Printf("server %d fail to send heartbeat to %d", rf.me, peerid)
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// handle reply
+	if reply.Success {
+		// if heartbeats rpc, skip update nextindex
+		if len(args.Entries) == 0 {
+			return
+		}
+		rf.nextIndex[peerid] += 1
+		rf.matchIndex[peerid] = args.PrevLogIndex
+		return
+	}
+
+	// if rpc reply.term > currentTerm
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		if rf.state != Follower {
+			log.Printf("server %d convert to follower with reply term %d > currentTerm %d", rf.me, reply.Term, rf.currentTerm)
+		}
+		rf.convert_to_follower()
+		return
+	}
+
+	// reply fails because of log inconsistency, decrease nextindex of peerid
+	if rf.state == Leader {
+		rf.nextIndex[peerid] -= 1
+	}
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	log.Printf("server %d received heartbeats", rf.me)
+	log.Printf("server %d received heartbeats from %d", rf.me, args.LeaderId)
 
+	reply.Term = rf.currentTerm
+	reply.Success = false
 	// 5.1 if a server If a server receives a request with a stale term number,
 	// it rejects the request.
 	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
+		log.Printf("server %d refuse %d with args.term %d < %d", rf.me, args.LeaderId, args.Term, rf.currentTerm)
 		return
 	}
 
+	// 5.3 doesn't contain an entry at preLogIndex whose term matches preLogIndex
 	if args.PrevLogIndex >= len(rf.log) {
-		reply.Term = rf.currentTerm
-		reply.Success = false
+		log.Printf("server %d refuse %d with index %d >= log_len %d", rf.me, args.LeaderId, args.PrevLogIndex, len(rf.log))
 		return
 	}
 
+	// 5.3 at prevLogindex with different term
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		//truncate the inconsistent logs
-		rf.log = rf.log[:args.PrevLogIndex]
-		//append entries to it
-		rf.log = append(rf.log, args.Entries...)
+		log.Printf("server %d refuse %d with index %d's term %d mismatches preterm %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
+		return
 	}
+
+	//truncate the inconsistent logs
+	rf.log = rf.log[:args.PrevLogIndex+1]
+	//append entries to it
+	rf.log = append(rf.log, args.Entries...)
 
 	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
 		if rf.state != Follower {
-			rf.state = Follower
+			log.Printf("server %d convert to follower", rf.me)
 		}
-		rf.votedFor = -1
+		rf.convert_to_follower()
 	}
 
 	rf.reset_ele_time()
@@ -493,7 +511,7 @@ func (rf *Raft) start_election() {
 			log.Printf("server %d become leader", rf.me)
 			rf.state = Leader
 			// return will sleep for at most 350ms, then others may become leaders, so send heartbeats at once
-			rf.send_heartbeats_nolock()
+			rf.append_entry_nolock()
 			rf.mu.Unlock()
 			return
 		} else {
@@ -532,7 +550,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		if rf.state == Leader {
 			// send heartbeats
-			rf.send_heartbeats_nolock()
+			rf.append_entry_nolock()
 			rf.mu.Unlock()
 		} else if time.Now().After(rf.electionTime) {
 			// election timeout, start election
@@ -546,6 +564,7 @@ func (rf *Raft) ticker() {
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
+		// log.Printf("server %d will sleep for %d ms", rf.me, ms)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -568,8 +587,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.state = Follower
-	rf.applyCh = applyCh
 	rf.reset_ele_time()
+
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.log = []LogEntry{{Term: 0}}
+
+	rf.commitIndex = 0
+	rf.LastApplied = 0
+
+	rf.nextIndex = make([]int, len(peers))
+	rf.nextIndex = make([]int, len(peers))
+	for i := range rf.nextIndex {
+		rf.nextIndex[i] = 1
+	}
+	rf.matchIndex = make([]int, len(peers))
+
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
