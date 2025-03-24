@@ -2,7 +2,7 @@ package raft
 
 import (
 	"fmt"
-	//log
+	// "log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -194,7 +194,7 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 				rf = ts.srvs[starts].raft
 			}
 			if rf != nil {
-				//log.Printf("peer %d Start %v", starts, cmd)
+				DPrintf("peer %d Start %v", starts, cmd)
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
