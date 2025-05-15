@@ -285,6 +285,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.log = append(rf.log, entry)
 	lastidx, _ := rf.lastLogEntry()
+	// rf.matchIndex[rf.me] = lastidx
 	rf.append_entry_nolock()
 	rf.mu.Unlock()
 
@@ -365,12 +366,13 @@ func (rf *Raft) append_entry_nolock() {
 
 	cnt := 0
 	for _, idx := range rf.matchIndex {
-		if idx >= rf.commitIndex {
+		if idx >= rf.commitIndex + 1{
 			cnt += 1
 		}
 		// if an entry is committed, then apply
-		if cnt > len(rf.peers)/2 {
+		if cnt + 1 > len(rf.peers)/2 {
 			rf.commitIndex += 1
+			rf.matchIndex[rf.me] = rf.commitIndex
 			rf.apply()
 			break
 		}
@@ -461,6 +463,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		lastidx, _ := rf.lastLogEntry()
 		rf.commitIndex = min(args.LeaderCommit, lastidx)
+		DPrintf("rpc trigger :server %d will apply", rf.me)
 		rf.apply()
 	}
 
@@ -535,7 +538,7 @@ func (rf *Raft) start_election() {
 			return
 		}
 
-		if votecnt > len(rf.peers)/2 {
+		if votecnt + 1 > len(rf.peers)/2 {
 			DPrintf("server %d become leader", rf.me)
 			rf.state = Leader
 			// return will sleep for at most 350ms, then others may become leaders, so send heartbeats at once
