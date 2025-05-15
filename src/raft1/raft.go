@@ -56,14 +56,12 @@ type LogEntry struct {
 	Command interface{}
 }
 
-func (rf *Raft) lastLogEntry() (int, LogEntry) {
+func (rf *Raft) lastLogIndexTerm() (int, int) {
 	if len(rf.log) == 0 {
-		return 0, LogEntry{
-			Term: 0,
-		}
+		return 0, 0
 	}
 	index := len(rf.log) - 1
-	return index, rf.log[index]
+	return index, rf.log[index].Term
 }
 
 type State int
@@ -214,8 +212,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.convert_to_follower()
 
-		lastlogidx, mylastlog := rf.lastLogEntry()
-		uptodate := args.LastLogTerm > mylastlog.Term || (args.LastLogTerm == mylastlog.Term && args.LastLogIndex >= lastlogidx)
+		lastlogidx, lastlogterm:= rf.lastLogIndexTerm()
+		uptodate := args.LastLogTerm > lastlogterm || (args.LastLogTerm == lastlogterm && args.LastLogIndex >= lastlogidx)
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && uptodate {
 			rf.votedFor = args.CandidateID
 			reply.VoteGranted = true
@@ -284,7 +282,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, entry)
-	lastidx, _ := rf.lastLogEntry()
+	lastidx, _ := rf.lastLogIndexTerm()
 	// rf.matchIndex[rf.me] = lastidx
 	rf.append_entry_nolock()
 	rf.mu.Unlock()
@@ -335,7 +333,7 @@ func (rf *Raft) reset_ele_time() {
 
 func (rf *Raft) append_entry_nolock() {
 	// send heartbeats in parallel
-	lastidx, _ := rf.lastLogEntry()
+	lastidx, _ := rf.lastLogIndexTerm()
 	for id := range rf.peers {
 		if id == rf.me {
 			continue
@@ -461,7 +459,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
-		lastidx, _ := rf.lastLogEntry()
+		lastidx, _ := rf.lastLogIndexTerm()
 		rf.commitIndex = min(args.LeaderCommit, lastidx)
 		DPrintf("rpc trigger :server %d will apply", rf.me)
 		rf.apply()
@@ -519,6 +517,7 @@ func (rf *Raft) start_election() {
 		args := &RequestVoteArgs{}
 		args.CandidateID = rf.me
 		args.Term = term
+		args.LastLogIndex, args.LastLogTerm = rf.lastLogIndexTerm()
 
 		// request votes from other servers
 		go rf.ask_votes(id, args, vote_ch)
@@ -593,7 +592,7 @@ func (rf *Raft) applier() {
 			applymsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.log[rf.lastApplied].Command,
-				CommandIndex: rf.commitIndex,
+				CommandIndex: rf.lastApplied,
 			}
 			DPrintf("server %d apply index %d, commitIndex %d", rf.me, rf.lastApplied, rf.commitIndex)
 			rf.applyCh <- applymsg
