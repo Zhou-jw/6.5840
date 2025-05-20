@@ -470,29 +470,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 }
 
-func (rf *Raft) send_heartbeats_nolock() {
 
-	for id := range rf.peers {
-		if id == rf.me {
-			continue
-		}
-
-		heartbeats := &AppendEntriesArgs{
-			Term:     rf.currentTerm,
-			LeaderId: rf.me,
-		}
-
-		// send heartbeats in parallel
-		go func(leader int, peerid int, args *AppendEntriesArgs) {
-			reply := AppendEntriesReply{}
-			ok := rf.peers[peerid].Call("Raft.AppendEntries", args, &reply)
-
-			if !ok {
-				DPrintf("server %d fail to send heartbeat to %d", leader, id)
-			}
-		}(rf.me, id, heartbeats)
-	}
-}
 
 func (rf *Raft) start_election() {
 	rf.mu.Lock()
@@ -537,12 +515,12 @@ func (rf *Raft) start_election() {
 			return
 		}
 
-		if votecnt + 1 > len(rf.peers)/2 {
+		if votecnt > len(rf.peers)/2 {
 			DPrintf("server %d become leader", rf.me)
 			rf.state = Leader
 			// return will sleep for at most 350ms, then others may become leaders, so send heartbeats at once
-			rf.append_entry_nolock()
 			rf.mu.Unlock()
+			go rf.send_heartbeats()
 			return
 		} else {
 			rf.votedFor = -1
@@ -602,6 +580,62 @@ func (rf *Raft) applier() {
 	}
 }
 
+func (rf *Raft) send_heartbeats() {
+
+	rf.mu.Lock()
+	// send heartbeats in parallel
+	lastidx, _ := rf.lastLogIndexTerm()
+	rf.matchIndex[rf.me] = lastidx
+	for id := range rf.peers {
+		if id == rf.me {
+			continue
+		}
+		nextidx := rf.nextIndex[id]
+		prevlog := rf.log[nextidx-1]
+
+		args := &AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: nextidx - 1,
+			PrevLogTerm:  prevlog.Term,
+			LeaderCommit: rf.commitIndex,
+		}
+
+		if lastidx-nextidx >= 0 {
+			args.Entries = make([]LogEntry, lastidx-nextidx+1)
+			copy(args.Entries, rf.log[nextidx:lastidx+1])
+		}
+
+		go rf.send_entry_to_peer(id, args)
+	}
+	ms := 5+ (rand.Int() % 5)
+	ms = ms * len(rf.peers)
+	rf.mu.Unlock()
+
+	time.Sleep(time.Duration(ms) * time.Millisecond)
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// check if entry is committed
+	if rf.commitIndex == lastidx {
+		return
+	}
+
+	cnt := 0
+	for _, idx := range rf.matchIndex {
+		if idx >= rf.commitIndex + 1{
+			cnt += 1
+		}
+		// if an entry is committed, then apply
+		if cnt + 1 > len(rf.peers)/2 {
+			rf.commitIndex += 1
+			rf.matchIndex[rf.me] = rf.commitIndex
+			rf.apply()
+			break
+		}
+	}
+}
+
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 
@@ -610,7 +644,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		if rf.state == Leader {
 			// send heartbeats
-			rf.append_entry_nolock()
+			go rf.send_heartbeats()
 			rf.mu.Unlock()
 		} else if time.Now().After(rf.electionTime) {
 			// election timeout, start election
