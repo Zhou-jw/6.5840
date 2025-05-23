@@ -368,7 +368,7 @@ func (rf *Raft) append_entry_nolock() {
 			cnt += 1
 		}
 		// if an entry is committed, then apply
-		if cnt + 1 > len(rf.peers)/2 {
+		if cnt > len(rf.peers)/2 {
 			rf.commitIndex += 1
 			rf.matchIndex[rf.me] = rf.commitIndex
 			rf.apply()
@@ -627,7 +627,7 @@ func (rf *Raft) send_heartbeats() {
 			cnt += 1
 		}
 		// if an entry is committed, then apply
-		if cnt + 1 > len(rf.peers)/2 {
+		if cnt > len(rf.peers)/2 {
 			rf.commitIndex += 1
 			rf.matchIndex[rf.me] = rf.commitIndex
 			rf.apply()
