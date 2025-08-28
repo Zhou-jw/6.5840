@@ -283,6 +283,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.log = append(rf.log, entry)
 	lastidx, _ := rf.lastLogIndexTerm()
+	term = rf.currentTerm
+	isLeader = (rf.state == Leader)
 	// rf.matchIndex[rf.me] = lastidx
 	rf.append_entry_nolock()
 	rf.mu.Unlock()
@@ -655,9 +657,9 @@ func (rf *Raft) ticker() {
 			rf.mu.Unlock()
 		}
 
-		// pause for a random amount of time between 50 and 350
+		// pause for a random amount of time between 150 and 300
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := 150 + (rand.Int63() % 150)
 		// log.Printf("server %d will sleep for %d ms", rf.me, ms)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
