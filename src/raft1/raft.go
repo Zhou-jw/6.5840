@@ -374,9 +374,13 @@ func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs) {
 		if len(args.Entries) == 0 {
 			return
 		}
+		// update matchIdx
 		matchidx := args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[peerid] = matchidx + 1
 		rf.matchIndex[peerid] = matchidx
+
+		// update leader commitIdx
+		go rf.update_commitidx()
 		return
 	}
 
@@ -393,6 +397,46 @@ func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs) {
 	// reply fails because of log inconsistency, decrease nextindex of peerid
 	if rf.state == Leader {
 		rf.nextIndex[peerid] -= 1
+	}
+}
+
+func (rf *Raft) update_commitidx() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	lastlogidx, _ := rf.lastLogIndexTerm()
+	if rf.commitIndex == lastlogidx {
+		return
+	}
+
+	initCommitIndex := rf.commitIndex
+	left := rf.commitIndex + 1
+	majority := len(rf.peers)/2 + 1
+	right := 0
+	for _, idx := range rf.matchIndex {
+	 	if idx > right{
+	 		right = idx
+	 	}
+	}
+	for left <= right{
+		mid := (left + right) /2
+		cnt :=0
+		// cond1: count the majority match log[mid]
+		for _, idx := range rf.matchIndex {
+			if idx >= mid {
+				cnt +=1
+			}
+		}
+		if cnt >= majority && rf.log[mid].Term == rf.currentTerm {
+			rf.commitIndex = mid
+			left = mid + 1
+		} else {
+			right = mid - 1
+		}
+	}
+	if initCommitIndex != rf.commitIndex {
+		DPrintf("leader %d update commitIndex from %d to %d", rf.me, initCommitIndex, rf.commitIndex)
+		rf.apply()
 	}
 }
 
@@ -541,27 +585,57 @@ func (rf *Raft) apply() {
 }
 
 func (rf *Raft) applier() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	for !rf.killed() {
-		if rf.commitIndex > rf.lastApplied {
-			rf.lastApplied += 1
-			applymsg := raftapi.ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[rf.lastApplied].Command,
-				CommandIndex: rf.lastApplied,
-			}
-			DPrintf("server %d apply index %d, commitIndex %d", rf.me, rf.lastApplied, rf.commitIndex)
-			rf.applyCh <- applymsg
-		} else {
-			rf.applyCond.Wait()
-		}
-	}
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+	// for !rf.killed() {
+	// 	if rf.commitIndex > rf.lastApplied {
+	// 		rf.lastApplied += 1
+	// 		applymsg := raftapi.ApplyMsg{
+	// 			CommandValid: true,
+	// 			Command:      rf.log[rf.lastApplied].Command,
+	// 			CommandIndex: rf.lastApplied,
+	// 		}
+	// 		DPrintf("server %d apply index %d, commitIndex %d", rf.me, rf.lastApplied, rf.commitIndex)
+	// 		rf.applyCh <- applymsg
+	// 	} else {
+	// 		rf.applyCond.Wait()
+	// 	}
+	// }
+    for !rf.killed() {
+        rf.mu.Lock()
+        // 1. 等待直到有新的日志可应用（循环防止虚假唤醒）
+        for rf.commitIndex <= rf.lastApplied && !rf.killed() {
+            rf.applyCond.Wait()
+        }
+        if rf.killed() {
+            rf.mu.Unlock()
+            return
+        }
+        // 2. 批量获取需要应用的日志范围（减少锁操作）
+        start := rf.lastApplied + 1
+        end := rf.commitIndex
+        // 3. 提前更新lastApplied（避免重复应用）
+        rf.lastApplied = end
+        rf.mu.Unlock() // 释放锁，避免阻塞其他操作
+
+        // 4. 发送日志到applyCh（不持有锁，防止阻塞）
+        for i := start; i <= end; i++ {
+            applyMsg := raftapi.ApplyMsg{
+                CommandValid: true,
+                Command:      rf.log[i].Command,
+                CommandIndex: i,
+            }
+            DPrintf("server %d applied index %d (commitIndex=%d)", rf.me, i, rf.commitIndex)
+            // 注意：若applyCh是无缓冲的，此处可能阻塞，但不影响锁持有
+            rf.applyCh <- applyMsg
+        }
+    }
 }
 
 func (rf *Raft) send_heartbeats() {
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// send heartbeats in parallel
 	lastidx, _ := rf.lastLogIndexTerm()
 	rf.matchIndex[rf.me] = lastidx
@@ -587,18 +661,18 @@ func (rf *Raft) send_heartbeats() {
 
 		go rf.send_entry_to_peer(id, args)
 	}
-	ms := 5+ (rand.Int() % 5)
-	ms = ms * len(rf.peers)
-	rf.mu.Unlock()
+	// rf.mu.Unlock()
 
-	time.Sleep(time.Duration(ms) * time.Millisecond)
+	// ms := 5+ (rand.Int() % 5)
+	// // ms = ms * len(rf.peers)
+	// time.Sleep(time.Duration(ms) * time.Millisecond)
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	// check if entry is committed
-	if rf.commitIndex == lastidx {
-		return
-	}
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+	// // check if entry is committed
+	// if rf.commitIndex == lastidx {
+	// 	return
+	// }
 
 	// cnt := 0
 	// for _, idx := range rf.matchIndex {
@@ -614,35 +688,35 @@ func (rf *Raft) send_heartbeats() {
 	// 	}
 	// }
 	// update commitIndex
-	initCommitIndex := rf.commitIndex
-	left := rf.commitIndex + 1
-	majority := len(rf.peers)/2 + 1
-	right := 0
-	for _, idx := range rf.matchIndex {
-	 	if idx > right{
-	 		right = idx
-	 	}
-	}
-	for left <= right{
-		mid := (left + right) /2
-		cnt :=0
-		// cond1: count the majority match log[mid]
-		for _, idx := range rf.matchIndex {
-			if idx >= mid {
-				cnt +=1
-			}
-		}
-		if cnt >= majority && rf.log[mid].Term == rf.currentTerm {
-			rf.commitIndex = mid
-			left = mid + 1
-		} else {
-			right = mid - 1
-		}
-	}
-	if initCommitIndex != rf.commitIndex {
-		DPrintf("leader %d update commitIndex from %d to %d", rf.me, initCommitIndex, rf.commitIndex)
-		rf.apply()
-	}
+	// initCommitIndex := rf.commitIndex
+	// left := rf.commitIndex + 1
+	// majority := len(rf.peers)/2 + 1
+	// right := 0
+	// for _, idx := range rf.matchIndex {
+	//  	if idx > right{
+	//  		right = idx
+	//  	}
+	// }
+	// for left <= right{
+	// 	mid := (left + right) /2
+	// 	cnt :=0
+	// 	// cond1: count the majority match log[mid]
+	// 	for _, idx := range rf.matchIndex {
+	// 		if idx >= mid {
+	// 			cnt +=1
+	// 		}
+	// 	}
+	// 	if cnt >= majority && rf.log[mid].Term == rf.currentTerm {
+	// 		rf.commitIndex = mid
+	// 		left = mid + 1
+	// 	} else {
+	// 		right = mid - 1
+	// 	}
+	// }
+	// if initCommitIndex != rf.commitIndex {
+	// 	DPrintf("leader %d update commitIndex from %d to %d", rf.me, initCommitIndex, rf.commitIndex)
+	// 	rf.apply()
+	// }
 }
 
 func (rf *Raft) ticker() {
@@ -666,7 +740,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 150 and 300
 		// milliseconds.
-		ms := 150 + (rand.Int63() % 150)
+		ms := 150 + (rand.Int() % 150)
 		// log.Printf("server %d will sleep for %d ms", rf.me, ms)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
