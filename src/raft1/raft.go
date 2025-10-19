@@ -69,7 +69,7 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	applyCh   chan ApplyMsg
+	applyCh   chan raftapi.ApplyMsg
 	applyCond *sync.Cond
 }
 
@@ -263,7 +263,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.currentTerm
 	isLeader = (rf.state == Leader)
 	// rf.matchIndex[rf.me] = lastidx
-	rf.append_entry_nolock()
+	// rf.append_entry_nolock()
 	rf.mu.Unlock()
 
 	return lastidx, term, isLeader
@@ -546,7 +546,7 @@ func (rf *Raft) applier() {
 	for !rf.killed() {
 		if rf.commitIndex > rf.lastApplied {
 			rf.lastApplied += 1
-			applymsg := ApplyMsg{
+			applymsg := raftapi.ApplyMsg{
 				CommandValid: true,
 				Command:      rf.log[rf.lastApplied].Command,
 				CommandIndex: rf.lastApplied,
@@ -600,18 +600,48 @@ func (rf *Raft) send_heartbeats() {
 		return
 	}
 
-	cnt := 0
+	// cnt := 0
+	// for _, idx := range rf.matchIndex {
+	// 	if idx >= rf.commitIndex + 1{
+	// 		cnt += 1
+	// 	}
+	// 	// if an entry is committed, then apply
+	// 	if cnt > len(rf.peers)/2 {
+	// 		rf.commitIndex += 1
+	// 		rf.matchIndex[rf.me] = rf.commitIndex
+	// 		rf.apply()
+	// 		break
+	// 	}
+	// }
+	// update commitIndex
+	initCommitIndex := rf.commitIndex
+	left := rf.commitIndex + 1
+	majority := len(rf.peers)/2 + 1
+	right := 0
 	for _, idx := range rf.matchIndex {
-		if idx >= rf.commitIndex + 1{
-			cnt += 1
+	 	if idx > right{
+	 		right = idx
+	 	}
+	}
+	for left <= right{
+		mid := (left + right) /2
+		cnt :=0
+		// cond1: count the majority match log[mid]
+		for _, idx := range rf.matchIndex {
+			if idx >= mid {
+				cnt +=1
+			}
 		}
-		// if an entry is committed, then apply
-		if cnt > len(rf.peers)/2 {
-			rf.commitIndex += 1
-			rf.matchIndex[rf.me] = rf.commitIndex
-			rf.apply()
-			break
+		if cnt >= majority && rf.log[mid].Term == rf.currentTerm {
+			rf.commitIndex = mid
+			left = mid + 1
+		} else {
+			right = mid - 1
 		}
+	}
+	if initCommitIndex != rf.commitIndex {
+		DPrintf("leader %d update commitIndex from %d to %d", rf.me, initCommitIndex, rf.commitIndex)
+		rf.apply()
 	}
 }
 
