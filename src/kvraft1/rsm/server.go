@@ -7,15 +7,24 @@ import (
 
 	"6.5840/labgob"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	"6.5840/raftapi"
 	"6.5840/tester1"
 )
 
 type Inc struct {
 }
 
-type Rep struct {
+type IncRep struct {
 	N int
+}
+
+type Null struct {
+}
+
+type NullRep struct {
+}
+
+type Dec struct {
 }
 
 type rsmSrv struct {
@@ -30,7 +39,10 @@ func makeRsmSrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.P
 	//log.Printf("mksrv %d", srv)
 	labgob.Register(Op{})
 	labgob.Register(Inc{})
-	labgob.Register(Rep{})
+	labgob.Register(IncRep{})
+	labgob.Register(Null{})
+	labgob.Register(NullRep{})
+	labgob.Register(Dec{})
 	s := &rsmSrv{
 		ts: ts,
 		me: srv,
@@ -40,15 +52,20 @@ func makeRsmSrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.P
 }
 
 func (rs *rsmSrv) DoOp(req any) any {
-	//log.Printf("%d: DoOp: %v", rs.me, req)
-	if _, ok := req.(Inc); ok == false {
+	//log.Printf("%d: DoOp: %T(%v)", rs.me, req, req)
+	switch req.(type) {
+	case Inc:
+		rs.mu.Lock()
+		rs.counter += 1
+		rs.mu.Unlock()
+		return &IncRep{rs.counter}
+	case Null:
+		return &NullRep{}
+	default:
 		// wrong type! expecting an Inc.
-		log.Fatalf("DoOp called with the wrong type")
+		log.Fatalf("DoOp should execute only Inc and not %T", req)
 	}
-	rs.mu.Lock()
-	rs.counter += 1
-	rs.mu.Unlock()
-	return &Rep{rs.counter}
+	return nil
 }
 
 func (rs *rsmSrv) Snapshot() []byte {
@@ -76,7 +93,7 @@ func (rs *rsmSrv) Kill() {
 	rs.rsm = nil
 }
 
-func (rs *rsmSrv) Raft() *raft.Raft {
+func (rs *rsmSrv) Raft() raftapi.Raft {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	return rs.rsm.Raft()
