@@ -132,7 +132,6 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -189,7 +188,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.convert_to_follower()
 
-		lastlogidx, lastlogterm:= rf.lastLogIndexTerm()
+		lastlogidx, lastlogterm := rf.lastLogIndexTerm()
 		uptodate := args.LastLogTerm > lastlogterm || (args.LastLogTerm == lastlogterm && args.LastLogIndex >= lastlogidx)
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && uptodate {
 			rf.votedFor = args.CandidateID
@@ -300,6 +299,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	XTerm   int
+	XIndex  int
+	XLen    int
 }
 
 func (rf *Raft) reset_ele_time() {
@@ -343,7 +345,7 @@ func (rf *Raft) append_entry_nolock() {
 
 	cnt := 0
 	for _, idx := range rf.matchIndex {
-		if idx >= rf.commitIndex + 1{
+		if idx >= rf.commitIndex+1 {
 			cnt += 1
 		}
 		// if an entry is committed, then apply
@@ -396,7 +398,28 @@ func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs) {
 
 	// reply fails because of log inconsistency, decrease nextindex of peerid
 	if rf.state == Leader {
-		rf.nextIndex[peerid] -= 1
+		origin_idx := rf.nextIndex[peerid]
+		if reply.XTerm != 0 {
+			is_xterm_existed := false
+			idx, _ := rf.lastLogIndexTerm()	
+			for idx > 0 && rf.log[idx].Term > reply.XTerm {
+				idx--
+			}
+			if(idx>0 && rf.log[idx].Term == reply.Term) {
+				is_xterm_existed = true
+			}
+			//case1: leader have XTerm
+			if is_xterm_existed {
+				rf.nextIndex[peerid] = idx+1
+			} else {
+			//case2: leader doesn't have XTerm
+				rf.nextIndex[peerid] = reply.XIndex
+			}
+		} else if reply.XLen !=0 {
+			//case3: follower's log is too short
+			rf.nextIndex[peerid] = reply.XLen
+		}	
+		DPrintf("leader %d update nextidx[ %d ] from %d to %d", rf.me, peerid, origin_idx, rf.nextIndex[peerid])
 	}
 }
 
@@ -414,17 +437,17 @@ func (rf *Raft) update_commitidx() {
 	majority := len(rf.peers)/2 + 1
 	right := 0
 	for _, idx := range rf.matchIndex {
-	 	if idx > right{
-	 		right = idx
-	 	}
+		if idx > right {
+			right = idx
+		}
 	}
-	for left <= right{
-		mid := (left + right) /2
-		cnt :=0
+	for left <= right {
+		mid := (left + right) / 2
+		cnt := 0
 		// cond1: count the majority match log[mid]
 		for _, idx := range rf.matchIndex {
 			if idx >= mid {
-				cnt +=1
+				cnt += 1
 			}
 		}
 		if cnt >= majority && rf.log[mid].Term == rf.currentTerm {
@@ -466,12 +489,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 5.3 doesn't contain an entry at preLogIndex whose term matches preLogIndex
 	if args.PrevLogIndex >= len(rf.log) {
 		DPrintf("server %d refuse %d with index %d >= log_len %d", rf.me, args.LeaderId, args.PrevLogIndex, len(rf.log))
+		reply.XLen = len(rf.log)
 		return
 	}
 
 	// 5.3 at prevLogindex with different term, fail because of inconsistency
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		DPrintf("server %d refuse %d with index %d's term %d mismatches preterm %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
+		DPrintf("server %d refuse %d with index %d's term %d mismatches leader's prelogterm %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
+		// seek to the first index of the conflicting entry of the term
+		xindex := args.PrevLogIndex
+		xterm := rf.log[args.PrevLogIndex].Term
+		for xindex > 0 && rf.log[xindex-1].Term == xterm {
+			xindex--
+		}
+		reply.XIndex = xindex
+		reply.XTerm = xterm
 		return
 	}
 
@@ -492,8 +524,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = args.Term
 	reply.Success = true
 }
-
-
 
 func (rf *Raft) start_election() {
 	rf.mu.Lock()
@@ -539,8 +569,12 @@ func (rf *Raft) start_election() {
 		}
 
 		if votecnt > len(rf.peers)/2 {
-			DPrintf("server %d become leader", rf.me)
+			DPrintf("server %d become leader, currentTerm %d", rf.me, rf.currentTerm)
 			rf.state = Leader
+			nextlog_idx := len(rf.log)
+			for i := range rf.nextIndex {
+				rf.nextIndex[i] = nextlog_idx
+			}
 			// return will sleep for at most 350ms, then others may become leaders, so send heartbeats at once
 			rf.mu.Unlock()
 			go rf.send_heartbeats()
@@ -601,35 +635,35 @@ func (rf *Raft) applier() {
 	// 		rf.applyCond.Wait()
 	// 	}
 	// }
-    for !rf.killed() {
-        rf.mu.Lock()
-        // 1. 等待直到有新的日志可应用（循环防止虚假唤醒）
-        for rf.commitIndex <= rf.lastApplied && !rf.killed() {
-            rf.applyCond.Wait()
-        }
-        if rf.killed() {
-            rf.mu.Unlock()
-            return
-        }
-        // 2. 批量获取需要应用的日志范围（减少锁操作）
-        start := rf.lastApplied + 1
-        end := rf.commitIndex
-        // 3. 提前更新lastApplied（避免重复应用）
-        rf.lastApplied = end
-        rf.mu.Unlock() // 释放锁，避免阻塞其他操作
+	for !rf.killed() {
+		rf.mu.Lock()
+		// 1. 等待直到有新的日志可应用（循环防止虚假唤醒）
+		for rf.commitIndex <= rf.lastApplied && !rf.killed() {
+			rf.applyCond.Wait()
+		}
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+		// 2. 批量获取需要应用的日志范围（减少锁操作）
+		start := rf.lastApplied + 1
+		end := rf.commitIndex
+		// 3. 提前更新lastApplied（避免重复应用）
+		rf.lastApplied = end
+		rf.mu.Unlock() // 释放锁，避免阻塞其他操作
 
-        // 4. 发送日志到applyCh（不持有锁，防止阻塞）
-        for i := start; i <= end; i++ {
-            applyMsg := raftapi.ApplyMsg{
-                CommandValid: true,
-                Command:      rf.log[i].Command,
-                CommandIndex: i,
-            }
-            DPrintf("server %d applied index %d (commitIndex=%d)", rf.me, i, rf.commitIndex)
-            // 注意：若applyCh是无缓冲的，此处可能阻塞，但不影响锁持有
-            rf.applyCh <- applyMsg
-        }
-    }
+		// 4. 发送日志到applyCh（不持有锁，防止阻塞）
+		for i := start; i <= end; i++ {
+			applyMsg := raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i,
+			}
+			DPrintf("server %d applied index %d (commitIndex=%d)", rf.me, i, rf.commitIndex)
+			// 注意：若applyCh是无缓冲的，此处可能阻塞，但不影响锁持有
+			rf.applyCh <- applyMsg
+		}
+	}
 }
 
 func (rf *Raft) send_heartbeats() {
@@ -773,7 +807,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.nextIndex = make([]int, len(peers))
 	rf.nextIndex = make([]int, len(peers))
 	for i := range rf.nextIndex {
 		rf.nextIndex[i] = 1
