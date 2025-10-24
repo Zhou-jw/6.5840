@@ -138,7 +138,7 @@ func (sg *ServerGrp) ConnectAll() {
 }
 
 func (sg *ServerGrp) ConnectOne(i int) {
-	log.Printf("==== server %d is reconnected ====", i)
+	// log.Printf("==== server %d is reconnected ====", i)
 	sg.connect(i, sg.all())
 }
 
@@ -255,7 +255,7 @@ func (sg *ServerGrp) StartServers() {
 
 // Shutdown a server by isolating it
 func (sg *ServerGrp) ShutdownServer(i int) {
-	//log.Printf("ShutdownServer %v", ServerName(sg.gid, i))
+	// log.Printf("==== ShutdownServer %v ====", ServerName(sg.gid, i))
 	sg.disconnect(i, sg.all())
 
 	// disable client connections to the server.
