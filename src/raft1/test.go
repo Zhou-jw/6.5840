@@ -2,7 +2,7 @@ package raft
 
 import (
 	"fmt"
-	"log"
+	// "log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
