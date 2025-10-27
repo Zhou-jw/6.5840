@@ -74,6 +74,18 @@ func (log *Log) truncate(index int) {
 	index = log.toArrayIndex(index)
 	log.entries = log.entries[:index]
 }
+
+func (log *Log) compact_to(index int) {
+		suffix := make([]LogEntry, 0)
+	suffix_idx := index + 1
+	if suffix_idx < log.lastIndex() {
+		suffix = log.entries[suffix_idx:]
+	}
+
+	log.entries = append(make([]LogEntry, 1), suffix...)
+	term0, _ := log.term(index)
+	log.entries[0] = LogEntry{Index: index, Term: term0}
+}
 // func (rf *Raft) lastLogIndexTerm() (int, int) {
 // 	if len(rf.log) == 0 {
 // 		return 0, 0

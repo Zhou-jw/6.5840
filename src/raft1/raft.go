@@ -160,9 +160,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	suffix := make([]LogEntry, 0)
-	suffix_idx := index
-	
+	rf.log.compact_to(index)
 }
 
 // example RequestVote RPC arguments structure.
