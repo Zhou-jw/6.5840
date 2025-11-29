@@ -130,6 +130,7 @@ func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 	err_msg := ""
 	v := m.Command
 	me := ts.srvs[i]
+	// log.Printf("server %v: log %v; msg: %v\n", i, me.logs, m)
 	for j, rs := range ts.srvs {
 		if old, oldok := rs.Logs(m.CommandIndex); oldok && old != v {
 			//log.Printf("%v: log %v; server %v\n", i, me.logs, rs.logs)
@@ -140,6 +141,7 @@ func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 	}
 	_, prevok := me.logs[m.CommandIndex-1]
 	me.logs[m.CommandIndex] = v
+	// log.Printf("after checklogs, server %v 's logs: %v", i, me.logs)
 	if m.CommandIndex > ts.maxIndex {
 		ts.maxIndex = m.CommandIndex
 	}
@@ -258,6 +260,7 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := ts.nCommitted(index)
+				// log.Printf("check index %d, nd is %d, cmd1 is %v", index, nd, cmd1)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {

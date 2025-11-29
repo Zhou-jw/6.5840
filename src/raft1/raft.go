@@ -141,7 +141,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.log = logEntries
 	// rf.matchIndex[rf.me] = len(logEntries) - 1
 	DPrintf("server %d restart, current term: %d, votedFor: %d, log last index: %d", rf.me, rf.currentTerm, rf.votedFor, rf.log.lastIndex())
-	DPrintf("%d", rf.log)
+	DPrintf("server %d 's log: %d", rf.me, rf.log)
 }
 
 // how many bytes in Raft's persisted log?
@@ -282,9 +282,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.persist()
 	DPrintf("leader %d will start cmd %d", rf.me, command)
 
-	lastidx := rf.log.lastIndex()
+	lastidx := rf.log.lastIndex() + 1
 	entry := LogEntry{
-		Index: lastidx+1,
+		Index: lastidx,
 		Term:    rf.currentTerm,
 		Command: command,
 	}
@@ -493,7 +493,7 @@ func (rf *Raft) update_commitidx() {
 	DPrintf("matchindex of leader %d is %d", rf.me, rf.matchIndex)
 	if initCommitIndex != rf.commitIndex {
 		DPrintf("leader %d update commitIndex from %d to %d", rf.me, initCommitIndex, rf.commitIndex)
-		DPrintf("%d", rf.log)
+		DPrintf("server %d 's log: %d", rf.me, rf.log)
 		rf.apply()
 	}
 }
@@ -524,7 +524,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	defer rf.reset_ele_time()
 	// 5.3 doesn't contain an entry at preLogIndex whose term matches preLogIndex
-	if args.PrevLogIndex >= rf.log.lastIndex() {
+	if args.PrevLogIndex > rf.log.lastIndex() {
 		DPrintf("server %d refuse %d with index %d >= log_len %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.log.lastIndex())
 		reply.XLen = rf.log.lastIndex()
 		return
@@ -536,8 +536,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("server %d refuse %d with index %d's term %d mismatches leader's prelogterm %d", rf.me, args.LeaderId, args.PrevLogIndex, myprevlogterm, args.PrevLogTerm)
 		// seek to the first index of the conflicting entry of the term
 		xindex := args.PrevLogIndex
-		xterm := rf.log.entries[args.PrevLogIndex].Term
-		for xindex > 0 && rf.log.entries[xindex-1].Term == xterm {
+		xterm := rf.log.Entries[args.PrevLogIndex].Term
+		for xindex > 0 && rf.log.Entries[xindex-1].Term == xterm {
 			xindex--
 		}
 		reply.XIndex = xindex
@@ -703,13 +703,14 @@ func (rf *Raft) applier() {
 		rf.mu.Unlock() // 释放锁，避免阻塞其他操作
 
 		// 4. 发送日志到applyCh（不持有锁，防止阻塞）
-		for i := start; i <= end; i++ {
+		new_committed_logs := rf.log.cloneslice(start, end+1)
+		for _, entry := range new_committed_logs {
 			applyMsg := raftapi.ApplyMsg{
 				CommandValid: true,
-				Command:      rf.log.at(i).Command,
-				CommandIndex: i,
+				Command:      entry.Command,
+				CommandIndex: entry.Index,
 			}
-			DPrintf("server %d applied index %d (commitIndex=%d)", rf.me, i, rf.commitIndex)
+			DPrintf("server %d applied index %d (commitIndex=%d), cmd(%d)", rf.me, entry.Index, rf.commitIndex, applyMsg.Command)
 			// 注意：若applyCh是无缓冲的，此处可能阻塞，但不影响锁持有
 			rf.applyCh <- applyMsg
 		}

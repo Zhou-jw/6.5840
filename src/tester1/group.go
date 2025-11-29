@@ -1,7 +1,7 @@
 package tester
 
 import (
-	"log"
+	// "log"
 	"strconv"
 	"sync"
 

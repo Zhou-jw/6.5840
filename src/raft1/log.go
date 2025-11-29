@@ -9,18 +9,18 @@ type LogEntry struct {
 }
 
 type Log struct {
-	entries []LogEntry
+	Entries []LogEntry
 }
 
 func makeLog() Log {
 	log := Log {
-		entries: []LogEntry{{Index: 0, Term: 0}},
+		Entries: []LogEntry{{Index: 0, Term: 0}},
 	}
 	return log
 }
 
 func (log *Log) firstIndex() int {
-	return log.entries[0].Index
+	return log.Entries[0].Index
 }
 
 func (log *Log) toArrayIndex(index int) int{
@@ -29,11 +29,11 @@ func (log *Log) toArrayIndex(index int) int{
 }
 
 func (log *Log) lastIndex() int {
-	if len(log.entries) == 0 {
+	if len(log.Entries) == 0 {
 		return 0
 	}
-	index := len(log.entries) - 1
-	return log.entries[index].Index
+	index := len(log.Entries) - 1
+	return log.Entries[index].Index
 }
 
 var ErrOutOfBound = errors.New("index out of bound")
@@ -43,12 +43,12 @@ func (log *Log) term(index int) (int , error) {
 		return 0, ErrOutOfBound
 	}
 	index = log.toArrayIndex(index)
-	return log.entries[index].Term, nil
+	return log.Entries[index].Term, nil
 }
 
-func (log *Log) at(index int) LogEntry{
+func (log *Log) at(index int) LogEntry {
 	index = log.toArrayIndex(index)
-	return log.entries[index]
+	return log.Entries[index]
 }
 
 func (log *Log) clone(entries []LogEntry) []LogEntry {
@@ -63,28 +63,28 @@ func (log *Log) cloneslice(start int, end int) []LogEntry {
 	}
 	start = log.toArrayIndex(start)
 	end = log.toArrayIndex(end)
-	return log.clone(log.entries[start:end])
+	return log.clone(log.Entries[start:end])
 }
 
 func (log *Log) append(new_entries []LogEntry) {
-	log.entries = append(log.entries, new_entries...)
+	log.Entries = append(log.Entries, new_entries...)
 }
 
 func (log *Log) truncate(index int) {
 	index = log.toArrayIndex(index)
-	log.entries = log.entries[:index]
+	log.Entries = log.Entries[:index]
 }
 
 func (log *Log) compact_to(index int) {
 		suffix := make([]LogEntry, 0)
 	suffix_idx := index + 1
 	if suffix_idx < log.lastIndex() {
-		suffix = log.entries[suffix_idx:]
+		suffix = log.Entries[suffix_idx:]
 	}
 
-	log.entries = append(make([]LogEntry, 1), suffix...)
+	log.Entries = append(make([]LogEntry, 1), suffix...)
 	term0, _ := log.term(index)
-	log.entries[0] = LogEntry{Index: index, Term: term0}
+	log.Entries[0] = LogEntry{Index: index, Term: term0}
 }
 // func (rf *Raft) lastLogIndexTerm() (int, int) {
 // 	if len(rf.log) == 0 {
