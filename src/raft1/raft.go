@@ -160,6 +160,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	DPrintf("try to compact to index %d, server %d 's log: %d", index, rf.me, rf.log)
 	rf.log.compact_to(index)
 }
 
@@ -212,8 +213,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.convert_to_follower()
 
 		lastlogidx := rf.log.lastIndex()
-		lastlogterm, _:= rf.log.term(lastlogidx)
-		
+		lastlogterm, _ := rf.log.term(lastlogidx)
+
 		uptodate := args.LastLogTerm > lastlogterm || (args.LastLogTerm == lastlogterm && args.LastLogIndex >= lastlogidx)
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && uptodate {
 			rf.votedFor = args.CandidateID
@@ -284,7 +285,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	lastidx := rf.log.lastIndex() + 1
 	entry := LogEntry{
-		Index: lastidx,
+		Index:   lastidx,
 		Term:    rf.currentTerm,
 		Command: command,
 	}
@@ -432,7 +433,7 @@ func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs) {
 		if reply.XTerm != 0 {
 			is_xterm_existed := false
 			idx := rf.log.lastIndex()
-			mterm, _:= rf.log.term(idx)
+			mterm, _ := rf.log.term(idx)
 			for idx > 0 && mterm > reply.XTerm {
 				idx--
 			}
@@ -446,11 +447,11 @@ func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs) {
 				//case2: leader doesn't have XTerm
 				rf.nextIndex[peerid] = reply.XIndex
 			}
-		} else if reply.XLen != 0 {
+		} else {
 			//case3: follower's log is too short
-			rf.nextIndex[peerid] = reply.XLen
+			rf.nextIndex[peerid] = rf.log.Entries[reply.XLen].Index+1
 		}
-		DPrintf("leader %d update nextidx[ %d ] from %d to %d", rf.me, peerid, origin_idx, rf.nextIndex[peerid])
+		DPrintf("leader %d update nextidx[%d] from %d to %d", rf.me, peerid, origin_idx, rf.nextIndex[peerid])
 	}
 }
 
@@ -483,7 +484,7 @@ func (rf *Raft) update_commitidx() {
 		}
 		if cnt >= majority {
 			left = mid + 1
-			if mterm, _:=rf.log.term(mid); mterm == rf.currentTerm {
+			if mterm, _ := rf.log.term(mid); mterm == rf.currentTerm {
 				rf.commitIndex = mid
 			}
 		} else {
@@ -525,7 +526,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.reset_ele_time()
 	// 5.3 doesn't contain an entry at preLogIndex whose term matches preLogIndex
 	if args.PrevLogIndex > rf.log.lastIndex() {
-		DPrintf("server %d refuse %d with index %d >= log_len %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.log.lastIndex())
+		DPrintf("server %d refuse %d with index %d >= log_len %d, xlen is %d, xterm is %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.log.lastIndex(), reply.XLen, reply.XTerm)
+		// if rf.log.lastIndex() == 0 {
+		// 	DPrintf("server %d 's log len 0, logs:%v", rf.me, rf.log)
+		// }
 		reply.XLen = rf.log.lastIndex()
 		return
 	}
@@ -534,19 +538,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	myprevlogterm, _ := rf.log.term(args.PrevLogIndex)
 	if myprevlogterm != args.PrevLogTerm {
 		DPrintf("server %d refuse %d with index %d's term %d mismatches leader's prelogterm %d", rf.me, args.LeaderId, args.PrevLogIndex, myprevlogterm, args.PrevLogTerm)
-		// seek to the first index of the conflicting entry of the term
+		// seek to the first index for the conflicting term
 		xindex := args.PrevLogIndex
-		xterm := rf.log.Entries[args.PrevLogIndex].Term
-		for xindex > 0 && rf.log.Entries[xindex-1].Term == xterm {
+		xterm, _ := rf.log.term(args.PrevLogIndex)
+		for xindex > 0 {
+			prevterm, _ := rf.log.term(xindex - 1)
+			if prevterm != xterm {
+				break
+			}
 			xindex--
 		}
+		// for prevlogterm,_ := rf.log.term(xindex-1); xindex > 0 && prevlogterm == xterm {
+		// 	xindex--
+		// }
 		reply.XIndex = xindex
 		reply.XTerm = xterm
 		return
 	}
 
 	//truncate the inconsistent logs
-	rf.log.truncate(args.PrevLogIndex+1)
+	rf.log.truncate(args.PrevLogIndex + 1)
 	//append entries to it
 	rf.log.append(args.Entries)
 
@@ -614,7 +625,7 @@ func (rf *Raft) start_election() {
 			rf.votedFor = rf.me
 
 			// reinitialize next log index
-			nextlog_idx := rf.log.lastIndex()+1
+			nextlog_idx := rf.log.lastIndex() + 1
 			for i := range rf.nextIndex {
 				rf.nextIndex[i] = nextlog_idx
 				rf.matchIndex[i] = 0
@@ -729,8 +740,24 @@ func (rf *Raft) send_heartbeats() {
 			continue
 		}
 		nextidx := rf.nextIndex[id]
-		prevlogterm, _:= rf.log.term(nextidx-1)
 
+		// if leader has discarded the logs to be sent, send snapshot
+		if nextidx <= rf.log.firstIndex() {
+			args := &InstallSnapshotArgs{
+				Term:              rf.currentTerm,
+				LeaderId:          rf.me,
+				LastIncludedIndex: rf.log.LastIncludedIndex(),
+				LastIncludedTerm:  rf.log.LastIncludedTerm(),
+				Offset:            0,
+				Data:              rf.log.Snapshot,
+				Done:              true,
+			}
+			DPrintf("leader %d send snapshot to server %d", rf.me, id)
+			go rf.send_snapshot_to_peer(id, args)
+			continue
+		}
+
+		prevlogterm, _ := rf.log.term(nextidx - 1)
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -742,7 +769,8 @@ func (rf *Raft) send_heartbeats() {
 		if lastidx-nextidx >= 0 {
 			// args.Entries = make([]LogEntry, lastidx-nextidx+1)
 			// copy(args.Entries, rf.log[nextidx:lastidx+1])
-			args.Entries = rf.log.cloneslice(nextidx, lastidx+1)	
+			DPrintf("send heartbeat to server %d: clone entries from %d to %d", id, nextidx, lastidx)
+			args.Entries = rf.log.cloneslice(nextidx, lastidx+1)
 		}
 
 		go rf.send_entry_to_peer(id, args)
