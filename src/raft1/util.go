@@ -1,12 +1,5 @@
 package raft
-
-import "log"
-
-// Debugging
-const Debug = false
-
+import "6.5840/tester1"
 func DPrintf(format string, a ...interface{}) {
-	if Debug {
-		log.Printf(format, a...)
-	}
+	tester.DPrintf(format, a...)
 }

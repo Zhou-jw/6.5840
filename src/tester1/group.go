@@ -4,7 +4,6 @@ import (
 	// "log"
 	"strconv"
 	"sync"
-
 	"6.5840/labrpc"
 )
 
@@ -138,7 +137,7 @@ func (sg *ServerGrp) ConnectAll() {
 }
 
 func (sg *ServerGrp) ConnectOne(i int) {
-	// log.Printf("==== server %d is reconnected ====", i)
+	DPrintf("==== server %d is reconnected ====", i)
 	sg.connect(i, sg.all())
 }
 
@@ -195,7 +194,7 @@ func (sg *ServerGrp) disconnect(i int, from []int) {
 }
 
 func (sg *ServerGrp) DisconnectAll(i int) {
-	// log.Printf("==== server %d disconected ====\n", i)
+	DPrintf("==== server %d disconected ====\n", i)
 	sg.disconnect(i, sg.all())
 }
 
