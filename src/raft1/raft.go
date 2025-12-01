@@ -91,6 +91,7 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	DPrintf("server %d persists", rf.me)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -140,6 +141,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.votedFor = votedFor
 	rf.log.Entries = logEntries
 	rf.log.Snapshot = rf.persister.ReadSnapshot()
+	rf.commitIndex = rf.log.LastIncludedIndex()
+	rf.lastApplied = rf.log.LastIncludedIndex()
 	// rf.matchIndex[rf.me] = len(logEntries) - 1
 	DPrintf("server %d restart, current term: %d, votedFor: %d, log last index: %d", rf.me, rf.currentTerm, rf.votedFor, rf.log.lastIndex())
 	DPrintf("server %d 's log: %v", rf.me, rf.log)
@@ -164,6 +167,14 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	DPrintf("try to compact to index %d, server %d 's log: %v", index, rf.me, rf.log)
 	rf.log.compact_to(index, snapshot)
+
+	if rf.lastApplied < index {
+		rf.lastApplied = index
+	}
+
+	if rf.commitIndex < index {
+		rf.commitIndex = index
+	}
 }
 
 // example RequestVote RPC arguments structure.
@@ -678,7 +689,7 @@ func (rf *Raft) ask_votes(serverId int, args *RequestVoteArgs, voteCh chan<- boo
 }
 
 func (rf *Raft) apply() {
-	rf.applyCond.Broadcast()
+	rf.applyCond.Signal()
 }
 
 func (rf *Raft) applier() {
@@ -708,13 +719,12 @@ func (rf *Raft) applier() {
 			rf.mu.Unlock()
 			return
 		}
-		// 2. 批量获取需要应用的日志范围（减少锁操作）
 		if rf.log.HasPendingSnapshot {
 			applyMsg := raftapi.ApplyMsg{
-				CommandValid: false,
+				CommandValid:  false,
 				SnapshotValid: true,
-				Snapshot:     rf.log.cloneSnapshot(),
-				SnapshotTerm: rf.log.LastIncludedTerm(),
+				Snapshot:      rf.log.cloneSnapshot(),
+				SnapshotTerm:  rf.log.LastIncludedTerm(),
 				SnapshotIndex: rf.log.LastIncludedIndex(),
 			}
 			rf.applyCh <- applyMsg
@@ -723,6 +733,7 @@ func (rf *Raft) applier() {
 			DPrintf("server %d applied snapshot index %d (commitIndex=%d)", rf.me, rf.lastApplied, rf.commitIndex)
 			rf.mu.Unlock()
 		} else {
+			// 2. 批量获取需要应用的日志范围（减少锁操作）
 			start := rf.lastApplied + 1
 			end := rf.commitIndex
 			// 3. 提前更新lastApplied（避免重复应用）
@@ -757,18 +768,18 @@ func (rf *Raft) send_heartbeats() {
 		if id == rf.me {
 			continue
 		}
-		nextidx := rf.nextIndex[id]
 
+		nextidx := rf.nextIndex[id]
+		lastincludedindex := rf.log.LastIncludedIndex()
+		lastincludedterm := rf.log.LastIncludedTerm()
 		// if leader has discarded the logs to be sent, send snapshot
-		if nextidx <= rf.log.LastIncludedIndex() {
+		if nextidx <= lastincludedindex {
 			args := &InstallSnapshotArgs{
 				Term:              rf.currentTerm,
 				LeaderId:          rf.me,
-				LastIncludedIndex: rf.log.LastIncludedIndex(),
-				LastIncludedTerm:  rf.log.LastIncludedTerm(),
-				Offset:            0,
-				Data:              rf.log.Snapshot,
-				Done:              true,
+				LastIncludedIndex: lastincludedindex,
+				LastIncludedTerm:  lastincludedterm,
+				Data:              rf.log.cloneSnapshot(),
 			}
 			DPrintf("leader %d send snapshot to server %d", rf.me, id)
 			go rf.send_snapshot_to_peer(id, args)
@@ -872,7 +883,8 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 150 and 300
 		// milliseconds.
-		ms := 150 + (rand.Int() % 150)
+		// ms := 150 + (rand.Int() % 150)
+		ms := 100
 		// log.Printf("server %d will sleep for %d ms", rf.me, ms)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
