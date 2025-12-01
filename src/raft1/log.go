@@ -12,12 +12,16 @@ type Log struct {
 	Entries         []LogEntry
 	Snapshot        []byte
 	TempSnapshotBuf []byte
+
+	// indicate there is a snapshot to be applied
+	HasPendingSnapshot bool
 }
 
 func makeLog() Log {
 	log := Log{
-		Entries: []LogEntry{{0,0,nil}},
+		Entries:  []LogEntry{{0, 0, nil}},
 		Snapshot: make([]byte, 0),
+		HasPendingSnapshot: false,
 	}
 	return log
 }
@@ -82,16 +86,23 @@ func (log *Log) truncate(index int) {
 	log.Entries = log.Entries[:index]
 }
 
-func (log *Log) compact_to(index int) {
+func (log *Log) compact_to(index int, snapshot []byte) {
 	suffix := make([]LogEntry, 0)
 	suffix_idx := index + 1
 	if suffix_idx < log.lastIndex() {
 		suffix_idx = log.toArrayIndex(suffix_idx)
 		suffix = log.Entries[suffix_idx:]
 	}
-
 	term0, _ := log.term(index)
 	log.Entries = append(make([]LogEntry, 1), suffix...)
 	log.Entries[0].Index = index
 	log.Entries[0].Term = term0
+	log.Snapshot = snapshot
+}
+
+func (log *Log) cloneSnapshot() []byte {
+	cloned := make([]byte, len(log.Snapshot))
+	DPrintf("clone snapshot: len %d", len(log.Snapshot))
+	copy(cloned, log.Snapshot)
+	return cloned
 }

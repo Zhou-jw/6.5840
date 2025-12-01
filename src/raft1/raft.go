@@ -95,14 +95,14 @@ func (rf *Raft) persist() {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
+	e.Encode(rf.log.Entries)
 	rfstate := w.Bytes()
-	rf.persister.Save(rfstate, nil)
+	rf.persister.Save(rfstate, rf.log.Snapshot)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if len(data) < 1 { // bootstrap without any state?
 		return
 	}
 	// Your code here (3C).
@@ -124,7 +124,7 @@ func (rf *Raft) readPersist(data []byte) {
 	var (
 		currentTerm int
 		votedFor    int
-		logEntries  Log
+		logEntries  []LogEntry
 	)
 
 	if err := d.Decode(&currentTerm); err != nil {
@@ -138,10 +138,11 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
-	rf.log = logEntries
+	rf.log.Entries = logEntries
+	rf.log.Snapshot = rf.persister.ReadSnapshot()
 	// rf.matchIndex[rf.me] = len(logEntries) - 1
 	DPrintf("server %d restart, current term: %d, votedFor: %d, log last index: %d", rf.me, rf.currentTerm, rf.votedFor, rf.log.lastIndex())
-	DPrintf("server %d 's log: %d", rf.me, rf.log)
+	DPrintf("server %d 's log: %v", rf.me, rf.log)
 }
 
 // how many bytes in Raft's persisted log?
@@ -159,9 +160,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
-	DPrintf("try to compact to index %d, server %d 's log: %d", index, rf.me, rf.log)
-	rf.log.compact_to(index)
+	DPrintf("try to compact to index %d, server %d 's log: %v", index, rf.me, rf.log)
+	rf.log.compact_to(index, snapshot)
 }
 
 // example RequestVote RPC arguments structure.
@@ -449,7 +451,7 @@ func (rf *Raft) send_entry_to_peer(peerid int, args *AppendEntriesArgs) {
 			}
 		} else {
 			//case3: follower's log is too short
-			rf.nextIndex[peerid] = rf.log.Entries[reply.XLen].Index+1
+			rf.nextIndex[peerid] = reply.XLen + 1
 		}
 		DPrintf("leader %d update nextidx[%d] from %d to %d", rf.me, peerid, origin_idx, rf.nextIndex[peerid])
 	}
@@ -494,7 +496,7 @@ func (rf *Raft) update_commitidx() {
 	DPrintf("matchindex of leader %d is %d", rf.me, rf.matchIndex)
 	if initCommitIndex != rf.commitIndex {
 		DPrintf("leader %d update commitIndex from %d to %d", rf.me, initCommitIndex, rf.commitIndex)
-		DPrintf("server %d 's log: %d", rf.me, rf.log)
+		DPrintf("server %d 's log: %v", rf.me, rf.log)
 		rf.apply()
 	}
 }
@@ -707,23 +709,39 @@ func (rf *Raft) applier() {
 			return
 		}
 		// 2. 批量获取需要应用的日志范围（减少锁操作）
-		start := rf.lastApplied + 1
-		end := rf.commitIndex
-		// 3. 提前更新lastApplied（避免重复应用）
-		rf.lastApplied = end
-		rf.mu.Unlock() // 释放锁，避免阻塞其他操作
-
-		// 4. 发送日志到applyCh（不持有锁，防止阻塞）
-		new_committed_logs := rf.log.cloneslice(start, end+1)
-		for _, entry := range new_committed_logs {
+		if rf.log.HasPendingSnapshot {
 			applyMsg := raftapi.ApplyMsg{
-				CommandValid: true,
-				Command:      entry.Command,
-				CommandIndex: entry.Index,
+				CommandValid: false,
+				SnapshotValid: true,
+				Snapshot:     rf.log.cloneSnapshot(),
+				SnapshotTerm: rf.log.LastIncludedTerm(),
+				SnapshotIndex: rf.log.LastIncludedIndex(),
 			}
-			DPrintf("server %d applied index %d (commitIndex=%d), cmd(%d)", rf.me, entry.Index, rf.commitIndex, applyMsg.Command)
-			// 注意：若applyCh是无缓冲的，此处可能阻塞，但不影响锁持有
 			rf.applyCh <- applyMsg
+			rf.log.HasPendingSnapshot = false
+			rf.lastApplied = rf.log.LastIncludedIndex()
+			DPrintf("server %d applied snapshot index %d (commitIndex=%d)", rf.me, rf.lastApplied, rf.commitIndex)
+			rf.mu.Unlock()
+		} else {
+			start := rf.lastApplied + 1
+			end := rf.commitIndex
+			// 3. 提前更新lastApplied（避免重复应用）
+			rf.lastApplied = end
+			DPrintf("server %d commit index is %d, last applied index changed from %d to %d", rf.me, rf.commitIndex, start-1, rf.lastApplied)
+			rf.mu.Unlock() // 释放锁，避免阻塞其他操作
+
+			// 4. 发送日志到applyCh（不持有锁，防止阻塞）
+			new_committed_logs := rf.log.cloneslice(start, end+1)
+			for _, entry := range new_committed_logs {
+				applyMsg := raftapi.ApplyMsg{
+					CommandValid: true,
+					Command:      entry.Command,
+					CommandIndex: entry.Index,
+				}
+				DPrintf("server %d applied index %d (commitIndex=%d), cmd(%d)", rf.me, entry.Index, rf.commitIndex, applyMsg.Command)
+				// 注意：若applyCh是无缓冲的，此处可能阻塞，但不影响锁持有
+				rf.applyCh <- applyMsg
+			}
 		}
 	}
 }
@@ -742,7 +760,7 @@ func (rf *Raft) send_heartbeats() {
 		nextidx := rf.nextIndex[id]
 
 		// if leader has discarded the logs to be sent, send snapshot
-		if nextidx <= rf.log.firstIndex() {
+		if nextidx <= rf.log.LastIncludedIndex() {
 			args := &InstallSnapshotArgs{
 				Term:              rf.currentTerm,
 				LeaderId:          rf.me,
