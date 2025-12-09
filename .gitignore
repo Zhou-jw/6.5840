@@ -4,3 +4,4 @@ mr-*
 *.test
 *.log
 *.out
+*debug_bin*

@@ -2,24 +2,30 @@ package rsm
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	raft "6.5840/raft1"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
-
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClerkId int
+	OpId    uint64
+	Req     any
 }
 
+type OpResult struct {
+	Err rpc.Err
+	Val any
+}
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -41,6 +47,10 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
+	nextOpId  uint64
+	notifiers map[int]*Notifier
+	lastAppliedOpId map[int] uint64 // ClerkId -> last applied OpId
+	opresults map[uint64] OpResult // OpId -> OpResult
 }
 
 // servers[] contains the ports of the set of
@@ -64,9 +74,14 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		notifiers:    make(map[int]*Notifier),
+		lastAppliedOpId: make(map[int]uint64),
+		opresults: make(map[uint64]OpResult),
 	}
+
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
+		go rsm.reader()
 	}
 	return rsm
 }
@@ -74,7 +89,6 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
-
 
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
@@ -86,5 +100,76 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// is the argument to Submit and id is a unique id for the op.
 
 	// your code here
+	opid := atomic.AddUint64(&rsm.nextOpId, 1)
+	op := Op{ClerkId: rsm.me, OpId: opid, Req: req}
+	op_ref := &op
+
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+
+	// wait for op to be applied or timeout
+	var prevterm int
+	if !rsm.is_op_applied(op_ref) {
+		_, term, is_leader := rsm.rf.Start(op)
+		prevterm = term
+		if !is_leader{
+			// not leader, garbage collect
+			return rpc.ErrWrongLeader, nil
+		}
+		rsm.register_to_notifier(op_ref)
+		rsm.wait_op_applied(op_ref)
+
+		currentTerm, isLeader := rsm.rf.GetState()
+		if !isLeader || currentTerm != prevterm {
+			raft.D4Printf("isLeader: %v term changed from %d to %d after call Submit()", isLeader, prevterm, currentTerm)
+			return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+		}
+	}
+
+	if rsm.is_op_applied(op_ref) {
+		res := rsm.opresults[op.OpId]
+		rsm.lastAppliedOpId[op.ClerkId] = op.OpId
+		delete(rsm.opresults, op.OpId) // garbage collect
+		return res.Err, res.Val
+	}
 	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+}
+
+func (rsm *RSM) reader() {
+	if rsm.rf == nil {
+		return
+	}
+	for msg := range rsm.applyCh {
+		// err_msg := ""
+		if msg.SnapshotValid {
+			// handle snapshot：通知状态机恢复快照（StateMachine 需实现快照恢复逻辑）
+			rsm.sm.Restore(msg.Snapshot)
+			raft.D4Printf("[RSM-%d] applied snapshot at index %d", rsm.me, msg.SnapshotIndex)
+			continue
+		}
+
+		// ignore invalid commands
+		if !msg.CommandValid {
+			continue
+		}
+
+		op, ok := msg.Command.(Op)
+		op_ref := &op
+		if !ok {
+			raft.D4Printf("[rsm-%d] invalid command type %T in applyCh", rsm.me, op)
+			continue
+		}
+
+		raft.D4Printf("[rsm-%d] applying type %T op %+v at index %d", rsm.me, op, op, msg.CommandIndex)
+
+		rsm.mu.Lock()
+		// 1. the command is committed, notify to apply it to state machine
+		rsm.notify(op_ref)
+		if !rsm.is_op_applied(op_ref) {
+			val := rsm.sm.DoOp(op.Req)
+			rsm.opresults[op.OpId] = OpResult{Err: rpc.OK, Val: val}
+			rsm.lastAppliedOpId[op.ClerkId] = op.OpId
+		}
+		rsm.mu.Unlock()
+	}
 }
