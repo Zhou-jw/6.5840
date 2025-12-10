@@ -57,7 +57,7 @@ func (ts *Test) mksrv(ends []*labrpc.ClientEnd, grp tester.Tgid, srv int, persis
 }
 
 func (ts *Test) restart(i int) {
-	// log.Printf("==== server %d restarted====", i)
+	DPrintf("==== server %d restarted====", i)
 	ts.g.StartServer(i) // which will call mksrv to make a new server
 	ts.Group(tester.GRP0).ConnectAll()
 }

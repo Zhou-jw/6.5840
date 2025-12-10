@@ -1,8 +1,9 @@
 package rsm
 
 import (
+	"math/rand"
 	"sync"
-	"sync/atomic"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
@@ -12,19 +13,22 @@ import (
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
+const maxWaitTime = time.Millisecond * 1500
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	ClerkId int
-	OpId    uint64
-	Req     any
+	Me     int
+	OpId   uint64
+	Req    any
+	OpType string // "Get", "Put", "Append"
 }
 
-type OpResult struct {
-	Err rpc.Err
-	Val any
+type pendingOp struct {
+	op    *Op
+	reply any
+	done  chan bool
 }
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
@@ -47,10 +51,9 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
-	nextOpId  uint64
-	notifiers map[int]*Notifier
-	lastAppliedOpId map[int] uint64 // ClerkId -> last applied OpId
-	opresults map[uint64] OpResult // OpId -> OpResult
+	nextOpId   uint64
+	pendingOps map[int]*pendingOp
+	r          *rand.Rand
 }
 
 // servers[] contains the ports of the set of
@@ -74,9 +77,8 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
-		notifiers:    make(map[int]*Notifier),
-		lastAppliedOpId: make(map[int]uint64),
-		opresults: make(map[uint64]OpResult),
+		pendingOps:   make(map[int]*pendingOp),
+		nextOpId:     0,
 	}
 
 	if !useRaftStateMachine {
@@ -90,6 +92,13 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
+func (rsm *RSM) generate_next_opid() uint64 {
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	return r.Uint64()
+}
+
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
 // try again.
@@ -100,39 +109,78 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// is the argument to Submit and id is a unique id for the op.
 
 	// your code here
-	opid := atomic.AddUint64(&rsm.nextOpId, 1)
-	op := Op{ClerkId: rsm.me, OpId: opid, Req: req}
-	op_ref := &op
+	opid := rsm.generate_next_opid()
+
+	op := Op{Me: rsm.me, OpId: opid, Req: req}
+	pendingOp_ref := &pendingOp{
+		op:   &op,
+		done: make(chan bool, 1),
+	}
+
+	index, term, is_leader := rsm.rf.Start(op)
+	if !is_leader {
+		return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	}
 
 	rsm.mu.Lock()
-	defer rsm.mu.Unlock()
+	if pendingOp, is_existed := rsm.pendingOps[index]; is_existed {
+		select {
+		case pendingOp.done <- false:
+		default:
+		}
+	}
+
+	rsm.pendingOps[index] = pendingOp_ref
+	rsm.mu.Unlock()
 
 	// wait for op to be applied or timeout
-	var prevterm int
-	if !rsm.is_op_applied(op_ref) {
-		_, term, is_leader := rsm.rf.Start(op)
-		prevterm = term
-		if !is_leader{
-			// not leader, garbage collect
-			return rpc.ErrWrongLeader, nil
-		}
-		rsm.register_to_notifier(op_ref)
-		rsm.wait_op_applied(op_ref)
+	err, rep := rsm.wait_op_applied(pendingOp_ref, term)
 
-		currentTerm, isLeader := rsm.rf.GetState()
-		if !isLeader || currentTerm != prevterm {
-			raft.D4Printf("isLeader: %v term changed from %d to %d after call Submit()", isLeader, prevterm, currentTerm)
-			return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	rsm.mu.Lock()
+	delete(rsm.pendingOps, index)
+	rsm.mu.Unlock()
+
+	return err, rep
+}
+
+func (rsm *RSM) wait_op_applied(pendingOp *pendingOp, term int) (rpc.Err, any) {
+	timeout := time.NewTimer(maxWaitTime)
+	defer timeout.Stop()
+	select {
+	case <-timeout.C:
+	case is_done := <-pendingOp.done:
+		if is_done {
+			currentTerm, is_leader := rsm.rf.GetState()
+			if !is_leader || currentTerm != term {
+				return rpc.ErrWrongLeader, nil
+			}
+			return rpc.OK, pendingOp.reply
 		}
 	}
-
-	if rsm.is_op_applied(op_ref) {
-		res := rsm.opresults[op.OpId]
-		rsm.lastAppliedOpId[op.ClerkId] = op.OpId
-		delete(rsm.opresults, op.OpId) // garbage collect
-		return res.Err, res.Val
-	}
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	return rpc.ErrWrongLeader, nil
+	// 设置绝对超时
+	// timeout := time.NewTimer(100 * time.Millisecond)
+	// n := 1
+	// defer timeout.Stop()
+	// for {
+	// 	select {
+	// 	case <-timeout.C:
+	// 		currentTerm, isLeader := rsm.rf.GetState()
+	// 		if !isLeader || currentTerm != term{
+	// 		raft.D4Printf("%d * 100ms expire time", n)
+	// 			return rpc.ErrWrongLeader, nil
+	// 		}
+	// 		raft.D4Printf("counter %d block", n)
+	// 		timeout.Reset(100 * time.Millisecond)
+	// 		n++
+	// 	case res := <-pendingOp.done:
+	// 		if res {
+	// 			return rpc.OK, pendingOp.reply // 操作成功完成
+	// 		} else {
+	// 			return rpc.ErrWrongLeader, nil // 操作失败，领导者变更、或者操作被覆盖、或者applyCh被关闭
+	// 		}
+	// 	}
+	// }
 }
 
 func (rsm *RSM) reader() {
@@ -154,22 +202,31 @@ func (rsm *RSM) reader() {
 		}
 
 		op, ok := msg.Command.(Op)
-		op_ref := &op
 		if !ok {
 			raft.D4Printf("[rsm-%d] invalid command type %T in applyCh", rsm.me, op)
 			continue
 		}
 
+		rsm.mu.Lock()
+		reply := rsm.sm.DoOp(op.Req)
+		if pendingOp, is_existed := rsm.pendingOps[msg.CommandIndex]; is_existed {
+			if pendingOp.op.OpId == op.OpId && pendingOp.op.Me == rsm.me {
+				pendingOp.reply = reply
+				select {
+				case pendingOp.done <- true:
+				default:
+				}
+			} else {
+				raft.D4Printf("repetitive opid %d",op.OpId)
+				select {
+				case pendingOp.done <- false:
+				default:
+				}
+			}
+		}
+
+		rsm.mu.Unlock()
 		raft.D4Printf("[rsm-%d] applying type %T op %+v at index %d", rsm.me, op, op, msg.CommandIndex)
 
-		rsm.mu.Lock()
-		// 1. the command is committed, notify to apply it to state machine
-		rsm.notify(op_ref)
-		if !rsm.is_op_applied(op_ref) {
-			val := rsm.sm.DoOp(op.Req)
-			rsm.opresults[op.OpId] = OpResult{Err: rpc.OK, Val: val}
-			rsm.lastAppliedOpId[op.ClerkId] = op.OpId
-		}
-		rsm.mu.Unlock()
 	}
 }

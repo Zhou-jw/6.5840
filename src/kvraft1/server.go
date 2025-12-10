@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"sync"
 	"sync/atomic"
 
 	"6.5840/kvraft1/rsm"
@@ -8,8 +9,12 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/tester1"
-
 )
+
+type ValueVer struct {
+	Value   string
+	Version rpc.Tversion
+}
 
 type KVServer struct {
 	me   int
@@ -17,6 +22,15 @@ type KVServer struct {
 	rsm  *rsm.RSM
 
 	// Your definitions here.
+	mu       sync.Mutex
+	db_inner map[string]ValueVer
+}
+
+type KVReq struct {
+	OpType  string
+	Key     string
+	Value   ValueVer
+	Version rpc.Tversion
 }
 
 // To type-cast req to the right type, take a look at Go's type switches or type
@@ -26,7 +40,67 @@ type KVServer struct {
 // https://go.dev/tour/methods/15
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
+	kvreq, ok := req.(KVReq)
+	if !ok {
+		tester.D4Printf("invalid op type in DoOp")
+		return nil
+	}
+
+	switch kvreq.OpType {
+	case "Get":
+		rep := kv.do_get(kvreq.Key)
+		return rep
+	case "Put":
+		rep := kv.do_put(kvreq.Key, kvreq.Value)
+		return rep
+	default:
+		tester.D4Printf("unknown op type in DoOp: %T", req)
+	}
 	return nil
+}
+
+func (kv *KVServer) do_get(key string) rpc.GetReply {
+	reply := rpc.GetReply{}
+
+	if valueVer, ok := kv.db_inner[key]; ok {
+		reply.Value = valueVer.Value
+		reply.Version = valueVer.Version
+		reply.Err = rpc.OK
+	} else {
+		reply.Err = rpc.ErrNoKey
+	}
+	return reply
+}
+
+func (kv *KVServer) do_put(key string, value ValueVer) rpc.PutReply {
+	reply := rpc.PutReply{}
+	valueVer, is_existed := kv.db_inner[key]
+
+	if !is_existed {
+		switch value.Version {
+		case 0:
+			kv.db_inner[key] = ValueVer{
+				Value:   value.Value,
+				Version: value.Version + 1,
+			}
+			reply.Err = rpc.OK
+		default:
+			reply.Err = rpc.ErrNoKey
+		}
+		return reply
+	}
+
+	if value.Version != valueVer.Version {
+		reply.Err = rpc.ErrVersion
+		return reply
+	}
+
+	kv.db_inner[key] = ValueVer{
+		Value:   value.Value,
+		Version: value.Version + 1,
+	}
+	reply.Err = rpc.OK
+	return reply
 }
 
 func (kv *KVServer) Snapshot() []byte {
@@ -42,12 +116,50 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a GetReply: rep.(rpc.GetReply)
+	kvreq := KVReq{
+		OpType: "Get",
+		Key:    args.Key,
+	}
+
+	err, rep := kv.rsm.Submit(kvreq)
+	if err != rpc.OK {
+		tester.D4Printf("fail to submit get req: %v, got res: %v", kvreq, rep)
+		return
+	}
+
+	get_reply, ok := rep.(rpc.GetReply)
+	if !ok {
+		tester.D4Printf("invalid reply type in Get: %T", rep)
+		return
+	}
+
+	reply.Value = get_reply.Value
+	reply.Version = get_reply.Version
+	reply.Err = get_reply.Err
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
+	kvreq := KVReq{
+		OpType: "Put",
+		Key:    args.Key,
+	}
+
+	err, rep := kv.rsm.Submit(kvreq)
+	if err != rpc.OK {
+		tester.D4Printf("fail to submit get req: %v, got res: %v", kvreq, rep)
+		return
+	}
+
+	put_reply, ok := rep.(rpc.PutReply)
+	if !ok {
+		tester.D4Printf("invalid reply type in Get: %T", rep)
+		return
+	}
+
+	reply.Err = put_reply.Err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -78,7 +190,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(rpc.GetArgs{})
 
 	kv := &KVServer{me: me}
-
 
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.

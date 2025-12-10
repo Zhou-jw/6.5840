@@ -19,6 +19,8 @@ const (
 type Tversion uint64
 
 type PutArgs struct {
+	// ClerkId int
+	// OpId    uint64
 	Key     string
 	Value   string
 	Version Tversion
@@ -29,6 +31,8 @@ type PutReply struct {
 }
 
 type GetArgs struct {
+	// ClerkId int
+	// OpId    uint64
 	Key string
 }
 

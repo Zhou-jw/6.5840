@@ -3,7 +3,7 @@ package tester
 import "log"
 
 // Debugging
-const Lab3 = false
+const Lab3 = true
 const Lab4 = true
 
 func DPrintf(format string, a ...interface{}) {

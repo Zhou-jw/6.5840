@@ -202,6 +202,7 @@ type RequestVoteReply struct {
 }
 
 func (rf *Raft) convert_to_follower() {
+	DPrintf("server %d step down to follower", rf.me)
 	rf.state = Follower
 	rf.votedFor = -1
 }
@@ -349,7 +350,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) reset_ele_time() {
 	// pause for a random amount of time between 500ms and 1000ms
-	ms := 500 + (rand.Int63() % 500)
+	ms := 300 + (rand.Int63() % 200)
 	rf.electionTime = time.Now().Add(time.Duration(ms) * time.Millisecond)
 	electionTimeMS := rf.electionTime.Format("15:04:05.000")
 	DPrintf("server %d reset ele time %s", rf.me, electionTimeMS)
@@ -868,15 +869,15 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		rf.mu.Lock()
-		if rf.state == Leader {
-			// send heartbeats
-			go rf.send_heartbeats()
-			rf.mu.Unlock()
-		} else if time.Now().After(rf.electionTime) {
+		if time.Now().After(rf.electionTime) {
 			// election timeout, start election
 			DPrintf("server %d starts election", rf.me)
 			rf.mu.Unlock()
 			rf.start_election()
+		} else if rf.state == Leader {
+			// send heartbeats
+			go rf.send_heartbeats()
+			rf.mu.Unlock()
 		} else {
 			rf.mu.Unlock()
 		}
