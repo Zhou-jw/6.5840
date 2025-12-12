@@ -869,15 +869,15 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		rf.mu.Lock()
-		if time.Now().After(rf.electionTime) {
+		if rf.state == Leader {
+			// send heartbeats
+			go rf.send_heartbeats()
+			rf.mu.Unlock()
+		} else if time.Now().After(rf.electionTime) {
 			// election timeout, start election
 			DPrintf("server %d starts election", rf.me)
 			rf.mu.Unlock()
 			rf.start_election()
-		} else if rf.state == Leader {
-			// send heartbeats
-			go rf.send_heartbeats()
-			rf.mu.Unlock()
 		} else {
 			rf.mu.Unlock()
 		}

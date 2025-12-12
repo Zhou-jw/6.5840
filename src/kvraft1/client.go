@@ -54,6 +54,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 			if ok := ck.clnt.Call(ck.servers[serverId], "KVServer.Get", &args, &reply); ok {
 				if reply.Err == rpc.OK {
 					ck.leaderId = serverId
+					tester.D4Printf("get key:%v, value: %v, version: %v", key, reply.Value, reply.Version)
 					return reply.Value, reply.Version, reply.Err
 				}
 			}
@@ -90,14 +91,19 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	resent := false
 	for {
 		for i := 0; i < len(ck.servers); i++ {
-			// log.Printf("try to put key:%s, value: %s, ver: %d", key, value, version)
 			serverId := (ck.leaderId + i) % len(ck.servers)
 			reply := rpc.PutReply{}
 			if ok := ck.clnt.Call(ck.servers[serverId], "KVServer.Put", &args, &reply); ok {
-				if resent && reply.Err == rpc.ErrVersion {
-					return rpc.ErrMaybe
-				} else if reply.Err == rpc.OK {
+				switch reply.Err {
+				case rpc.OK:
 					ck.leaderId = serverId
+					tester.D4Printf("successfully put key:%s, value: %s, ver: %d", key, value, version)
+				case rpc.ErrVersion:
+					if resent {
+						return rpc.ErrMaybe
+					}
+				case rpc.ErrWrongLeader:
+					continue
 				}
 				return reply.Err
 			}
