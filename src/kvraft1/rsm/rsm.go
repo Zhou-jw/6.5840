@@ -22,7 +22,6 @@ type Op struct {
 	Me     int
 	OpId   uint64
 	Req    any
-	OpType string // "Get", "Put", "Append"
 }
 
 type pendingOp struct {
@@ -53,7 +52,6 @@ type RSM struct {
 	// Your definitions here.
 	nextOpId   uint64
 	pendingOps map[int]*pendingOp
-	r          *rand.Rand
 }
 
 // servers[] contains the ports of the set of

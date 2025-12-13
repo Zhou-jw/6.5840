@@ -137,7 +137,7 @@ func (sg *ServerGrp) ConnectAll() {
 }
 
 func (sg *ServerGrp) ConnectOne(i int) {
-	DPrintf("==== server %d is reconnected ====", i)
+	D0Printf("==== server %d is reconnected ====", i)
 	sg.connect(i, sg.all())
 }
 
@@ -173,7 +173,7 @@ func (sg *ServerGrp) connect(i int, to []int) {
 // detach server from the servers listed in from
 // caller must hold cfg.mu
 func (sg *ServerGrp) disconnect(i int, from []int) {
-	DPrintf("%p: disconnect peer %d from %v\n", sg, i, from)
+	D0Printf("%p: disconnect peer %d from %v\n", sg, i, from)
 
 	sg.mu.Lock()
 	sg.connected[i] = false
@@ -253,7 +253,7 @@ func (sg *ServerGrp) StartServers() {
 
 // Shutdown a server by isolating it
 func (sg *ServerGrp) ShutdownServer(i int) {
-	DPrintf("==== ShutdownServer %v ====", ServerName(sg.gid, i))
+	D0Printf("==== ShutdownServer %v ====", ServerName(sg.gid, i))
 	sg.disconnect(i, sg.all())
 
 	// disable client connections to the server.
@@ -300,7 +300,7 @@ func (sg *ServerGrp) MakePartition(l int) ([]int, []int) {
 }
 
 func (sg *ServerGrp) Partition(p1 []int, p2 []int) {
-	DPrintf("partition servers into: %v %v\n", p1, p2)
+	D0Printf("partition servers into: %v %v\n", p1, p2)
 	for i := 0; i < len(p1); i++ {
 		sg.disconnect(p1[i], p2)
 		sg.connect(p1[i], p1)

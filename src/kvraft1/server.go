@@ -84,7 +84,7 @@ func (kv *KVServer) do_put(key string, value string, version rpc.Tversion) rpc.P
 				Version: version + 1,
 			}
 			reply.Err = rpc.OK
-			tester.D4Printf("insert key:%s, value:%s, version: %d to %d", key, value, version, kv.db_inner[key].Version)
+			tester.D4Printf("[rsm-%d] insert key:%s, value:%s, version: %d to %d", kv.me, key, value, version, kv.db_inner[key].Version)
 		default:
 			reply.Err = rpc.ErrNoKey
 		}
@@ -100,7 +100,7 @@ func (kv *KVServer) do_put(key string, value string, version rpc.Tversion) rpc.P
 		Value:   value,
 		Version: version + 1,
 	}
-	tester.D4Printf("update key:%s, value:%s, version: %d to %d", key, value, version, kv.db_inner[key].Version)
+	tester.D4Printf("[rsm-%d] update key:%s, value:%s, version: %d to %d", kv.me, key, value, version, kv.db_inner[key].Version)
 	reply.Err = rpc.OK
 	return reply
 }
@@ -125,13 +125,13 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 
 	err, rep := kv.rsm.Submit(kvreq)
 	if err != rpc.OK {
-		tester.D4Printf("fail to submit get req: %v, got res: %v", kvreq, rep)
+		tester.D4Printf("[rsm-%d] fail to submit get req: %v, got res: %v", kv.me, kvreq, rep)
 		return
 	}
 
 	get_reply, ok := rep.(rpc.GetReply)
 	if !ok {
-		tester.D4Printf("invalid reply type in Get: %T", rep)
+		tester.D4Printf("[rsm-%d] invalid reply type in Get: %T", kv.me, rep)
 		return
 	}
 
@@ -162,9 +162,9 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 		reply.Err = put_reply.Err
 	case rpc.ErrWrongLeader:
 		reply.Err = rpc.ErrWrongLeader
+	default:
+		tester.D4Printf("[rsm-%d] Err %v: fail to submit put req: %v, got res: %v", kv.me, err, kvreq, rep)
 	}
-
-	tester.D4Printf("Err %v: fail to submit put req: %v, got res: %v", err, kvreq, rep)
 }
 
 // the tester calls Kill() when a KVServer instance won't

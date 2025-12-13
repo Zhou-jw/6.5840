@@ -52,7 +52,14 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
 			reply := rpc.GetReply{}
 			if ok := ck.clnt.Call(ck.servers[serverId], "KVServer.Get", &args, &reply); ok {
-				if reply.Err == rpc.OK {
+				switch reply.Err {
+				case rpc.ErrWrongLeader:
+					continue
+				case rpc.ErrNoKey:
+					ck.leaderId = serverId
+					tester.D4Printf("get key:%v, no such key", key)
+					return "", 0, reply.Err
+				case rpc.OK:
 					ck.leaderId = serverId
 					tester.D4Printf("get key:%v, value: %v, version: %v", key, reply.Value, reply.Version)
 					return reply.Value, reply.Version, reply.Err
@@ -106,10 +113,10 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 					continue
 				}
 				return reply.Err
-			}
-			resent = true
-			time.Sleep(retryInterval)
+			} 
 		}
+		resent = true
+		time.Sleep(retryInterval)
 	}
 	// return rpc.ErrNoKey
 }
